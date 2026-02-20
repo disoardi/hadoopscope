@@ -20,10 +20,28 @@ environments:
       user: hdfs
       ssl: false
 
+    # ---------------------------------------------------------------------------
+    # Kerberos (SPNEGO) — richiede kinit + curl nel PATH
+    # ---------------------------------------------------------------------------
+    # HadoopScope usa kinit per rinnovare il ticket all'avvio, poi curl --negotiate
+    # per tutte le chiamate WebHDFS (GETCONTENTSUMMARY, JMX, CREATE, DELETE).
+    # Ambari usa sempre Basic Auth (user/pass) anche in ambienti kerberizzati.
+    #
+    # Prerequisiti sul nodo che esegue HadoopScope:
+    #   - kinit/klist installati  (krb5-user su Debian, krb5-workstation su RHEL)
+    #   - curl installato
+    #   - /etc/krb5.conf configurato con il realm corretto
+    #   - keytab leggibile dall'utente che esegue hadoopscope
+    #
+    # Keytab — opzioni:
+    #   keytab: /etc/security/keytabs/monitor.keytab      # path diretto
+    #   keytab: "${KEYTAB_PATH}"                           # da variabile d'ambiente
+    #   keytab: "${file:/run/secrets/monitor.keytab}"      # da Docker/k8s secret
     kerberos:
       enabled: false
-      # keytab: "${KEYTAB_PATH}"
-      # principal: monitor@CORP.COM
+      # enabled: true
+      # keytab: "${KEYTAB_PATH}"       # path assoluto al keytab
+      # principal: monitor@CORP.COM    # principal del keytab (es. hdfs/namenode.corp.com@CORP.COM)
 
     ansible:
       edge_host: edge01.corp.com

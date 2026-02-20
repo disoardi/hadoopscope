@@ -37,6 +37,9 @@ def discover_capabilities():
     caps["kinit"] = bool(shutil.which("kinit"))
     caps["klist"]  = bool(shutil.which("klist"))
 
+    # curl (usato per SPNEGO/Kerberos con WebHDFS)
+    caps["curl"] = bool(shutil.which("curl"))
+
     # Zabbix sender
     caps["zabbix_sender"] = bool(shutil.which("zabbix_sender"))
 
