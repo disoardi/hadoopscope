@@ -1,0 +1,14 @@
+[tool]
+name        = "hadoopscope"
+description = "Unified Hadoop cluster health monitoring (HDP + CDP). Runs anywhere, requires nothing."
+version     = "0.1.0-dev"
+repo        = "https://github.com/disoardi/hadoopscope"
+language    = "python"
+
+[tool.run]
+entrypoint  = "hadoopscope.py"
+python_min  = "3.6"
+args        = ["--help"]
+
+[tool.isolation]
+prefer      = "venv"

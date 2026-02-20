@@ -1,0 +1,98 @@
+# HadoopScope — Example Config
+# Copia in config/hadoopscope.yaml e adatta al tuo ambiente.
+# IMPORTANTE: non committare questo file con credenziali reali!
+# Usa variabili d'ambiente: ambari_pass: "${AMBARI_PASS}"
+
+version: "1"
+
+environments:
+  prod-hdp:
+    type: hdp
+    enabled: true
+    ambari_url: https://ambari.corp.com:8080
+    ambari_user: admin
+    ambari_pass: "${AMBARI_PASS}"
+    cluster_name: prod-cluster
+    ambari_api_version: "v1"
+
+    webhdfs:
+      url: http://namenode.corp.com:9870
+      user: hdfs
+      ssl: false
+
+    kerberos:
+      enabled: false
+      # keytab: "${KEYTAB_PATH}"
+      # principal: monitor@CORP.COM
+
+    ansible:
+      edge_host: edge01.corp.com
+      ssh_user: monitor
+      ssh_key: ~/.ssh/monitor_key
+      become: false
+
+checks:
+  service_health:
+    enabled: true
+    services: [HDFS, YARN, HIVE, HBASE, OOZIE, ZOOKEEPER]
+    alert_on: [CRITICAL, WARNING]
+
+  namenode_ha:
+    enabled: true
+
+  hdfs_space:
+    enabled: true
+    paths:
+      - path: /user/hive/warehouse
+        warning_pct: 75
+        critical_pct: 90
+      - path: /tmp
+        warning_pct: 80
+        critical_pct: 95
+
+  hdfs_writability:
+    enabled: true
+    test_path: /tmp/.hadoopscope-probe
+
+  hdfs_dead_datanodes:
+    enabled: true
+    warning_threshold: 1
+    critical_threshold: 3
+
+  small_files:
+    enabled: true
+    paths: [/user/hive/warehouse]
+    threshold_avg_mb: 128
+
+  hive_partitions:
+    enabled: true
+    databases: [default]
+    warning_threshold: 5000
+    critical_threshold: 10000
+
+alerts:
+  email:
+    enabled: false
+    smtp_host: smtp.corp.com
+    smtp_port: 587
+    smtp_tls: true
+    from_addr: hadoopscope@corp.com
+    to:
+      - hadoop-ops@corp.com
+    on_severity: [WARNING, CRITICAL]
+
+  zabbix:
+    enabled: false
+    server: zabbix.corp.com
+    host: hadoop-monitor
+
+  log:
+    enabled: true
+    path: /tmp/hadoopscope-logs/
+    format: text
+    rotate_days: 30
+
+output:
+  format: text
+  verbosity: normal
+  color: true

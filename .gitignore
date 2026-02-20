@@ -1,0 +1,27 @@
+# Config con credenziali reali
+config/hadoopscope.yaml
+config/*.prod.yaml
+config/*.local.yaml
+*.keytab
+.env
+secrets.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# HadoopScope runtime
+/tmp/hadoopscope-*/
+~/.hadoopscope/
+
+# IDE
+.idea/
+.vscode/
+*.swp
