@@ -1,0 +1,103 @@
+[tool.poetry]
+name = "hadoopscope"
+version = "0.1.0"
+description = "Unified Hadoop cluster health monitoring (HDP + CDP). Runs anywhere, requires nothing."
+authors = ["Davide Isoardi <disoardi@users.noreply.github.com>"]
+license = "MIT"
+readme = "README.md"
+homepage = "https://disoardi.github.io/hadoopscope"
+repository = "https://github.com/disoardi/hadoopscope"
+documentation = "https://disoardi.github.io/hadoopscope"
+keywords = ["hadoop", "hdp", "cdp", "ambari", "cloudera", "monitoring", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.6",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Monitoring",
+    "Topic :: System :: Systems Administration",
+]
+
+# -------------------------------------------------------------------------
+# Runtime: ZERO dipendenze — solo Python 3.6+ stdlib
+#
+# Il core (checks/, alerts/, config.py, bootstrap.py, hadoopscope.py)
+# gira con solo Python 3.6+ senza nulla da installare.
+# PyYAML è opzionale: il parser manuale integrato è il fallback automatico.
+# -------------------------------------------------------------------------
+[tool.poetry.dependencies]
+python = ">=3.6"
+
+# -------------------------------------------------------------------------
+# Dev group — strumenti di sviluppo locale
+# Installazione: poetry install --with dev
+# -------------------------------------------------------------------------
+[tool.poetry.group.dev]
+optional = true
+
+[tool.poetry.group.dev.dependencies]
+pyyaml = ">=5.1"      # YAML parsing più veloce (fallback: parser stdlib interno)
+
+# -------------------------------------------------------------------------
+# Test group — esecuzione test con pytest (opzionale)
+# I test girano anche senza Poetry: python3 tests/run_all.py
+# Installazione: poetry install --with test
+# -------------------------------------------------------------------------
+[tool.poetry.group.test]
+optional = true
+
+[tool.poetry.group.test.dependencies]
+pyyaml = ">=5.1"
+# pytest 7+ richiede Python 3.8+ — marcatore esplicito
+pytest = {version = ">=7.0", python = ">=3.8"}
+
+# -------------------------------------------------------------------------
+# Docs group — build della documentazione MkDocs
+# mkdocs-material richiede Python 3.8+ → marcatori espliciti
+# Installazione: poetry install --with docs
+# Build: poetry run mkdocs build
+# -------------------------------------------------------------------------
+[tool.poetry.group.docs]
+optional = true
+
+[tool.poetry.group.docs.dependencies]
+mkdocs          = {version = ">=1.5",  python = ">=3.8"}
+mkdocs-material = {version = ">=9.0",  python = ">=3.8"}
+
+# -------------------------------------------------------------------------
+# Scripts
+# -------------------------------------------------------------------------
+[tool.poetry.scripts]
+hadoopscope = "hadoopscope:main"
+
+# -------------------------------------------------------------------------
+# Build system
+# -------------------------------------------------------------------------
+[build-system]
+requires      = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+# -------------------------------------------------------------------------
+# Pytest
+# -------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths    = ["tests"]
+python_files = ["test_*.py"]
+
+# -------------------------------------------------------------------------
+# Ruff linter (non installato di default — usa: pip install ruff)
+# -------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py36"
+line-length    = 100
+select         = ["E", "F", "W"]
+ignore         = ["E501"]

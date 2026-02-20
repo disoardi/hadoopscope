@@ -6,6 +6,10 @@ version: "3.8"
 # Usage:
 #   docker compose up --build --abort-on-container-exit
 #   docker compose run hadoopscope --config /app/config/test.yaml --env mock-hdp --dry-run
+#
+# Secrets management in Docker:
+#   docker compose run -e AMBARI_PASS=secret hadoopscope ...
+#   docker compose run -v /run/secrets:/run/secrets hadoopscope ...
 
 services:
 
@@ -15,8 +19,7 @@ services:
       context: .
       dockerfile: Dockerfile.mock
     ports:
-      - "18080:8080"   # Ambari / YARN / WebHDFS
-      - "17180:7180"   # Cloudera Manager
+      - "18080:8080"
     environment:
       - SCENARIO=ok
     healthcheck:
@@ -27,17 +30,16 @@ services:
       retries: 10
       start_period: 2s
 
-  # HadoopScope tool — dry-run contro il mock server
+  # HadoopScope — dry-run contro il mock server (scenario ok)
   hadoopscope:
     build:
       context: .
     depends_on:
       mock-api:
         condition: service_healthy
-    volumes:
-      - ./config:/app/config:ro
     environment:
-      - AMBARI_PASS=admin
+      # Secrets tramite variabili d'ambiente (opzione 1)
+      - AMBARI_PASS=docker-test-pass
     command:
       - --config
       - /app/config/docker-test.yaml
@@ -49,7 +51,19 @@ services:
       - --output
       - text
 
-  # Test runner — lancia test_checks.py contro il mock server
+  # Mock server scenario critical (per test di alerting)
+  mock-api-critical:
+    build:
+      context: .
+      dockerfile: Dockerfile.mock
+    ports:
+      - "18081:8080"
+    environment:
+      - SCENARIO=critical
+    profiles:
+      - critical
+
+  # Test runner — lancia tutti i test pytest/unittest
   test-runner:
     build:
       context: .
@@ -61,4 +75,6 @@ services:
     working_dir: /app
     environment:
       - HADOOPSCOPE_TEST_API_URL=http://mock-api:8080
+      # Test per secrets via env var
+      - HS_DOCKER_TEST_SECRET=docker_secret_value
     command: ["python3", "tests/run_all.py"]

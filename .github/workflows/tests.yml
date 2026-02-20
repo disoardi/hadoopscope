@@ -7,10 +7,15 @@ on:
     branches: [main, master]
 
 jobs:
+  # -----------------------------------------------------------------------
+  # Test matrix: Python 3.6 / 3.9 / 3.11 / 3.12
+  # Con PyYAML installato tramite venv (non sistema)
+  # -----------------------------------------------------------------------
   test:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.6", "3.9", "3.11", "3.12"]
 
@@ -22,60 +27,156 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install PyYAML (optional, for convenience)
-        run: pip install pyyaml || true
-
-      - name: Run unit tests
-        run: python3 tests/test_base.py
-
-      - name: Run integration tests
-        run: python3 tests/test_checks.py
-
-      - name: Dry-run smoke test (text)
+      - name: Create venv and install dev deps
         run: |
-          python3 hadoopscope.py \
+          python -m venv .venv
+          .venv/bin/pip install --quiet pyyaml
+
+      - name: Run all tests (via venv)
+        run: .venv/bin/python tests/run_all.py
+
+      - name: Dry-run smoke test — text output
+        run: |
+          .venv/bin/python hadoopscope.py \
             --config config/test.yaml \
             --env test-hdp \
             --checks all \
             --dry-run \
             --output text
 
-      - name: Dry-run smoke test (json)
+      - name: Dry-run smoke test — JSON output
         run: |
-          python3 hadoopscope.py \
+          .venv/bin/python hadoopscope.py \
             --config config/test.yaml \
             --env test-hdp \
             --dry-run \
             --output json
 
       - name: Show capabilities
-        run: python3 hadoopscope.py --show-capabilities
+        run: .venv/bin/python hadoopscope.py --show-capabilities
 
+  # -----------------------------------------------------------------------
+  # Test zero-deps: il core deve girare senza PyYAML
+  # -----------------------------------------------------------------------
   test-no-pyyaml:
     name: Zero-deps (no PyYAML)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v5
         with:
           python-version: "3.9"
-      - name: Run tests WITHOUT PyYAML
+
+      - name: Create bare venv (NO PyYAML)
+        run: python -m venv .venv
+
+      - name: Verify PyYAML is NOT available
         run: |
-          python3 -c "import yaml" 2>/dev/null && pip uninstall -y pyyaml || true
-          python3 tests/test_base.py
-          python3 hadoopscope.py \
+          .venv/bin/python -c "import yaml; print('ERROR: yaml available')" 2>/dev/null \
+            && exit 1 || echo "OK: yaml not available (expected)"
+
+      - name: Run unit tests without PyYAML
+        run: .venv/bin/python tests/test_base.py
+
+      - name: Run config tests without PyYAML
+        run: .venv/bin/python tests/test_config.py
+
+      - name: Dry-run without PyYAML
+        run: |
+          .venv/bin/python hadoopscope.py \
             --config config/test.yaml \
             --env test-hdp \
             --dry-run \
             --output text
 
+  # -----------------------------------------------------------------------
+  # Test secrets: verifica i pattern ${file:...} e ${cmd:...}
+  # -----------------------------------------------------------------------
+  test-secrets:
+    name: Secrets integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Test secret from env var
+        env:
+          AMBARI_PASS: "from_env_var_test"
+        run: |
+          python -c "
+          import os, sys
+          sys.path.insert(0, '.')
+          from config import _resolve_env
+          result = _resolve_env('AMBARI_PASS')
+          assert result == 'from_env_var_test', 'Got: ' + result
+          print('PASS: env var secret')
+          "
+
+      - name: Test secret from file
+        run: |
+          echo -n "from_file_test" > /tmp/test_secret
+          python -c "
+          import sys; sys.path.insert(0, '.')
+          from config import _resolve_file
+          result = _resolve_file('/tmp/test_secret')
+          assert result == 'from_file_test', 'Got: ' + result
+          print('PASS: file secret')
+          "
+
+      - name: Test secret from command
+        run: |
+          python -c "
+          import sys; sys.path.insert(0, '.')
+          from config import _resolve_cmd
+          result = _resolve_cmd('echo -n cmdpassword')
+          assert result == 'cmdpassword', 'Got: ' + result
+          print('PASS: cmd secret')
+          "
+
+      - name: Test .env auto-load
+        run: |
+          mkdir -p /tmp/hs_test_env
+          echo "HS_TEST_SECRET=loaded_from_dotenv" > /tmp/hs_test_env/.env
+          cat > /tmp/hs_test_env/test.yaml << 'EOF'
+          version: "1"
+          environments:
+            test:
+              type: hdp
+              ambari_url: http://localhost:8080
+              ambari_user: admin
+              ambari_pass: "${HS_TEST_SECRET}"
+              cluster_name: test
+          EOF
+          python -c "
+          import sys; sys.path.insert(0, '.')
+          from config import load_config
+          cfg = load_config('/tmp/hs_test_env/test.yaml')
+          result = cfg['environments']['test']['ambari_pass']
+          assert result == 'loaded_from_dotenv', 'Got: ' + str(result)
+          print('PASS: .env auto-load')
+          "
+
+  # -----------------------------------------------------------------------
+  # Docker integration test
+  # -----------------------------------------------------------------------
   docker-test:
     name: Docker integration test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Build Docker images
         run: docker compose build
-      - name: Run integration tests via Docker
-        run: |
-          docker compose run --rm test-runner
+
+      - name: Run test-runner in Docker
+        run: docker compose run --rm test-runner
+
+      - name: Cleanup
+        if: always()
+        run: docker compose down --remove-orphans

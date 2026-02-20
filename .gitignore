@@ -16,6 +16,10 @@ dist/
 build/
 venv/
 .venv/
+poetry.lock       # non committato — il tool non ha runtime deps
+
+# Poetry local config
+poetry.toml
 
 # HadoopScope runtime
 /tmp/hadoopscope-*/

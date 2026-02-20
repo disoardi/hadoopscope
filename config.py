@@ -1,12 +1,35 @@
-"""Config loader — YAML manual parser con env var expansion. Zero deps."""
+"""
+Config loader — YAML manual parser + env var expansion + multi-source secrets.
+Zero dipendenze runtime: solo Python 3.6+ stdlib.
+
+Sorgenti di secret supportate nelle stringhe di config:
+
+  ${ENV_VAR}              <- variabile d'ambiente
+  ${file:/path/to/secret} <- contenuto di un file (Docker secrets, k8s)
+  ${cmd:vault kv get ...} <- stdout di un comando (Vault, pass, aws, az, ...)
+
+Caricamento automatico di .env:
+  Se nella stessa directory del config file esiste un file .env, viene caricato
+  automaticamente prima dell'espansione delle variabili.
+  Il file .env NON viene mai committato (e' in .gitignore).
+
+Esempio di config sicuro:
+
+  ambari_pass: "${AMBARI_PASS}"
+  ambari_pass: "${file:/run/secrets/ambari_pass}"
+  ambari_pass: "${cmd:vault kv get -field=password secret/hadoop/ambari}"
+  ambari_pass: "${cmd:pass show hadoop/ambari}"
+  ambari_pass: "${cmd:aws secretsmanager get-secret-value --secret-id ambari --query SecretString --output text}"
+"""
 
 from __future__ import print_function
 
 import os
 import re
+import subprocess
 import sys
 
-# Gestione import yaml: prova PyYAML come convenienza in dev,
+# Gestione import yaml: prova PyYAML come convenienza,
 # ma il parser manuale garantisce zero-deps in produzione.
 try:
     import yaml as _yaml
@@ -15,39 +38,166 @@ except ImportError:
     _HAS_PYYAML = False
 
 
-def _expand_env_vars(value):
+# ---------------------------------------------------------------------------
+# .env loader
+# ---------------------------------------------------------------------------
+
+def _load_dotenv(dotenv_path):
+    # type: (str) -> None
+    """
+    Carica variabili da un file .env in os.environ.
+    Formato: KEY=value (una per riga, # commenti, righe vuote ignorate).
+    NON sovrascrive variabili gia' presenti nell'ambiente.
+    """
+    if not os.path.exists(dotenv_path):
+        return
+
+    with open(dotenv_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            if '=' not in line:
+                continue
+            key, _, val = line.partition('=')
+            key = key.strip()
+            val = val.strip()
+            # Rimuovi eventuali quote attorno al valore
+            if len(val) >= 2 and ((val[0] == '"' and val[-1] == '"') or
+                                   (val[0] == "'" and val[-1] == "'")):
+                val = val[1:-1]
+            # Non sovrascrivere variabili gia' presenti nel shell environment
+            if key and key not in os.environ:
+                os.environ[key] = val
+
+
+# ---------------------------------------------------------------------------
+# Secret resolvers
+# ---------------------------------------------------------------------------
+
+def _resolve_env(var_name):
+    # type: (str) -> str
+    """Legge una variabile d'ambiente. Errore descrittivo se mancante."""
+    val = os.environ.get(var_name)
+    if val is None:
+        raise ValueError(
+            "Environment variable '{}' is not set.\n"
+            "Options:\n"
+            "  1. export {}=yourvalue\n"
+            "  2. Add {}=yourvalue to a .env file next to your config\n"
+            "  3. Use ${{file:/path/to/secret}} in config\n"
+            "  4. Use ${{cmd:your-vault-cmd}} in config".format(
+                var_name, var_name, var_name)
+        )
+    return val
+
+
+def _resolve_file(file_path):
+    # type: (str) -> str
+    """Legge il secret dal contenuto di un file (strippato)."""
+    path = os.path.expanduser(file_path.strip())
+    if not os.path.exists(path):
+        raise ValueError(
+            "Secret file not found: '{}'\n"
+            "Used by config pattern ${{file:{}}}".format(path, file_path)
+        )
+    with open(path, 'r') as f:
+        content = f.read().strip()
+    if not content:
+        raise ValueError("Secret file is empty: '{}'".format(path))
+    return content
+
+
+def _resolve_cmd(command):
+    # type: (str) -> str
+    """
+    Esegue un comando shell e usa lo stdout come secret.
+    Il comando viene passato a /bin/sh -c per supportare pipe e argomenti.
+    Timeout: 30 secondi.
+    """
+    try:
+        proc = subprocess.Popen(
+            command,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        stdout, stderr = proc.communicate(timeout=30)
+        rc = proc.returncode
+    except subprocess.TimeoutExpired:
+        raise ValueError(
+            "Secret command timed out (30s): '{}'".format(command)
+        )
+    except Exception as e:
+        raise ValueError(
+            "Error running secret command '{}': {}".format(command, str(e))
+        )
+
+    if rc != 0:
+        err = stderr.decode("utf-8", errors="replace").strip()[:300]
+        raise ValueError(
+            "Secret command '{}' exited with code {}:\n{}".format(command, rc, err)
+        )
+
+    secret = stdout.decode("utf-8", errors="replace").strip()
+    if not secret:
+        raise ValueError(
+            "Secret command produced no output: '{}'".format(command)
+        )
+    return secret
+
+
+# ---------------------------------------------------------------------------
+# Expander principale
+# ---------------------------------------------------------------------------
+
+# Pattern: ${...} dove ... puo' contenere qualsiasi cosa tranne }
+_SECRET_RE = re.compile(r'\$\{([^}]+)\}')
+
+
+def _resolve_secret(spec):
+    # type: (str) -> str
+    """
+    Risolve un singolo pattern ${...}:
+      file:/path  -> contenuto di un file
+      cmd:...     -> stdout di un comando shell
+      ANYTHING    -> variabile d'ambiente
+    """
+    spec = spec.strip()
+    if spec.startswith("file:"):
+        return _resolve_file(spec[5:])
+    elif spec.startswith("cmd:"):
+        return _resolve_cmd(spec[4:])
+    else:
+        return _resolve_env(spec)
+
+
+def _expand_secrets(value):
     # type: (object) -> object
-    """Espande ${VAR} nelle stringhe. Errore descrittivo se var mancante."""
+    """Espande tutti i pattern ${...} nelle stringhe."""
     if not isinstance(value, str):
         return value
 
     def replacer(match):
-        var_name = match.group(1)
-        val = os.environ.get(var_name)
-        if val is None:
-            raise ValueError(
-                "Environment variable '{}' is not set. "
-                "Export it before running HadoopScope.".format(var_name)
-            )
-        return val
+        return _resolve_secret(match.group(1))
 
-    return re.sub(r'\$\{([^}]+)\}', replacer, value)
+    return _SECRET_RE.sub(replacer, value)
 
 
 def _walk_expand(obj):
     # type: (object) -> object
-    """Ricorsivamente espande env var in tutto il config tree."""
+    """Ricorsivamente espande secret in tutto il config tree."""
     if isinstance(obj, dict):
         return {k: _walk_expand(v) for k, v in obj.items()}
     elif isinstance(obj, list):
         return [_walk_expand(i) for i in obj]
     elif isinstance(obj, str):
-        return _expand_env_vars(obj)
+        return _expand_secrets(obj)
     return obj
 
 
 # ---------------------------------------------------------------------------
-# Parser YAML minimale (stdlib-only) — supporta il subset usato da HadoopScope
+# Parser YAML minimale (stdlib-only)
 # ---------------------------------------------------------------------------
 
 def _parse_yaml_manual(text):
@@ -57,15 +207,12 @@ def _parse_yaml_manual(text):
     Supporta: dict annidati, liste con -, inline list [a, b], scalar, bool, int.
     Non supporta: multi-line strings, anchors, merge keys.
     """
-    lines = text.splitlines()
-    # Rimuovi commenti e righe vuote
-    cleaned = []
-    for line in lines:
-        # Rimuovi commenti inline (ma non # dentro stringhe quotate)
+    lines = []
+    for line in text.splitlines():
         stripped = line.rstrip()
         if not stripped or stripped.lstrip().startswith('#'):
             continue
-        # Rimuovi commento inline (semplice)
+        # Rimuovi commento inline (non dentro stringhe)
         in_quote = False
         quote_char = None
         for i, ch in enumerate(stripped):
@@ -78,9 +225,9 @@ def _parse_yaml_manual(text):
                 stripped = stripped[:i].rstrip()
                 break
         if stripped:
-            cleaned.append(stripped)
+            lines.append(stripped)
 
-    result, _ = _parse_block(cleaned, 0, 0)
+    result, _ = _parse_block(lines, 0, 0)
     return result
 
 
@@ -91,33 +238,26 @@ def _get_indent(line):
 
 def _parse_scalar(value):
     # type: (str) -> object
-    """Converte una stringa scalare nel tipo Python appropriato."""
     v = value.strip()
     if not v:
         return None
-    # Quoted string
     if (v.startswith('"') and v.endswith('"')) or \
        (v.startswith("'") and v.endswith("'")):
         return v[1:-1]
-    # Bool
     if v.lower() in ('true', 'yes', 'on'):
         return True
     if v.lower() in ('false', 'no', 'off'):
         return False
-    # Null
     if v.lower() in ('null', '~', ''):
         return None
-    # Int
     try:
         return int(v)
     except ValueError:
         pass
-    # Float
     try:
         return float(v)
     except ValueError:
         pass
-    # Inline list [a, b, c]
     if v.startswith('[') and v.endswith(']'):
         inner = v[1:-1].strip()
         if not inner:
@@ -128,10 +268,6 @@ def _parse_scalar(value):
 
 def _parse_block(lines, start, base_indent):
     # type: (list, int, int) -> tuple
-    """
-    Parsa un blocco YAML a partire da `start`.
-    Restituisce (oggetto_parsato, indice_prossima_riga_non_consumata).
-    """
     result = {}
     i = start
 
@@ -143,25 +279,19 @@ def _parse_block(lines, start, base_indent):
         if indent < base_indent:
             break
 
-        # Lista item
         if stripped.startswith('- ') or stripped == '-':
-            # Siamo in una lista — rilancia come lista
             result_list, i = _parse_list(lines, i, indent)
             return result_list, i
 
-        # Key: value
         if ':' in stripped:
             colon = stripped.index(':')
             key = stripped[:colon].strip()
             rest = stripped[colon + 1:].strip()
-
             i += 1
 
             if rest:
-                # Valore inline
                 result[key] = _parse_scalar(rest)
             else:
-                # Valore nel blocco successivo
                 if i < len(lines):
                     next_indent = _get_indent(lines[i])
                     if next_indent > indent:
@@ -197,7 +327,6 @@ def _parse_list(lines, start, base_indent):
         if stripped.startswith('- '):
             item_text = stripped[2:].strip()
             if not item_text:
-                # Blocco annidato sotto la lista
                 i += 1
                 if i < len(lines) and _get_indent(lines[i]) > indent:
                     value, i = _parse_block(lines, i, _get_indent(lines[i]))
@@ -205,14 +334,11 @@ def _parse_list(lines, start, base_indent):
                 else:
                     result.append(None)
             elif ':' in item_text:
-                # Dict inline come item lista
                 sub_line = ' ' * (indent + 2) + item_text
                 sub_result, _ = _parse_block([sub_line] + lines[i + 1:], 0, indent + 2)
-                # Controlla se ci sono righe figlie
                 i += 1
                 while i < len(lines) and _get_indent(lines[i]) > indent:
-                    extra_line = lines[i]
-                    extra_key_val = extra_line.strip()
+                    extra_key_val = lines[i].strip()
                     if ':' in extra_key_val:
                         colon = extra_key_val.index(':')
                         k = extra_key_val[:colon].strip()
@@ -223,7 +349,7 @@ def _parse_list(lines, start, base_indent):
             else:
                 result.append(_parse_scalar(item_text))
                 i += 1
-        elif stripped.startswith('-') and len(stripped) == 1:
+        elif stripped == '-':
             result.append(None)
             i += 1
         else:
@@ -232,12 +358,30 @@ def _parse_list(lines, start, base_indent):
     return result, i
 
 
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
 def load_config(path):
     # type: (str) -> dict
-    """Carica e valida il config file YAML."""
+    """
+    Carica e valida il config file YAML.
+
+    Sequenza:
+    1. Carica .env dalla stessa directory del config (se esiste)
+    2. Parsa il YAML (PyYAML se disponibile, parser interno come fallback)
+    3. Espande ${ENV_VAR}, ${file:/path}, ${cmd:...} in tutti i valori stringa
+    4. Valida la struttura minima (environments non vuota)
+    """
     if not os.path.exists(path):
         raise IOError("Config file not found: {}".format(path))
 
+    # 1. Auto-carica .env vicino al config
+    config_dir = os.path.dirname(os.path.abspath(path))
+    dotenv_path = os.path.join(config_dir, ".env")
+    _load_dotenv(dotenv_path)
+
+    # 2. Parsa YAML
     with open(path, 'r') as f:
         raw = f.read()
 
@@ -249,10 +393,10 @@ def load_config(path):
     if not isinstance(data, dict):
         raise ValueError("Config file must be a YAML mapping at root level")
 
-    # Espandi env var
+    # 3. Espandi secrets
     data = _walk_expand(data)
 
-    # Validazione minima
+    # 4. Validazione minima
     if "environments" not in data:
         raise ValueError("Config missing 'environments' key")
     if not data["environments"]:

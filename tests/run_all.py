@@ -12,6 +12,7 @@ ROOT_DIR  = os.path.dirname(TESTS_DIR)
 
 test_files = [
     os.path.join(TESTS_DIR, "test_base.py"),
+    os.path.join(TESTS_DIR, "test_config.py"),
     os.path.join(TESTS_DIR, "test_checks.py"),
 ]
 
