@@ -25,3 +25,15 @@ venv/
 .idea/
 .vscode/
 *.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker/
+
+# Logs
+*.log
+hadoopscope-*.log
+hadoopscope-*.json

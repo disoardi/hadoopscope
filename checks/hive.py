@@ -1,0 +1,168 @@
+"""Check Hive — via Ansible+beeline (richiede ansible) oppure HiveServer2 REST."""
+
+from __future__ import print_function
+
+import json
+import os
+import subprocess
+import tempfile
+
+from checks.base import CheckBase, CheckResult
+
+
+_BEELINE_TEST_QUERY = "SELECT 1;"
+_BEELINE_SCRIPT_TEMPLATE = """#!/bin/bash
+set -e
+beeline -u 'jdbc:hive2://{host}:{port}/{db}' \\
+        -n '{user}' \\
+        -e '{query}' \\
+        --silent=true \\
+        --outputformat=csv2 2>&1
+"""
+
+_ANSIBLE_PLAYBOOK_TEMPLATE = """---
+- name: HadoopScope Hive check
+  hosts: edge
+  gather_facts: false
+  tasks:
+    - name: Run Hive test query
+      shell: |
+        {beeline_cmd}
+      register: result
+    - name: Show result
+      debug:
+        var: result.stdout
+"""
+
+
+class HiveCheck(CheckBase):
+    """
+    Controlla la disponibilità di HiveServer2 via beeline tramite Ansible.
+    Richiede ansible (sistema o venv bootstrap) + accesso SSH all'edge node.
+    """
+
+    requires = [["ansible"], ["venv_ansible"], ["docker_ansible_image"]]
+    fallback = None
+
+    def run(self):
+        # type: () -> CheckResult
+        ansible_cfg = self.config.get("ansible", {})
+        edge_host   = ansible_cfg.get("edge_host")
+        ssh_user    = ansible_cfg.get("ssh_user", "hadoop")
+        ssh_key     = ansible_cfg.get("ssh_key")
+        hive_cfg    = self.config.get("hive", {})
+        hive_host   = hive_cfg.get("host", edge_host or "localhost")
+        hive_port   = hive_cfg.get("port", 10000)
+        hive_db     = hive_cfg.get("database", "default")
+        hive_user   = hive_cfg.get("user", ssh_user)
+
+        if not edge_host:
+            return CheckResult(
+                name="HiveCheck",
+                status=CheckResult.UNKNOWN,
+                message="ansible.edge_host not configured"
+            )
+
+        # Determina ansible binary
+        ansible_bin = self._find_ansible()
+        if not ansible_bin:
+            return CheckResult(
+                name="HiveCheck",
+                status=CheckResult.SKIPPED,
+                message="ansible binary not found despite can_run() check"
+            )
+
+        beeline_cmd = (
+            "beeline -u 'jdbc:hive2://{host}:{port}/{db}' "
+            "-n '{user}' -e '{query}' --silent=true --outputformat=csv2"
+        ).format(
+            host=hive_host, port=hive_port,
+            db=hive_db, user=hive_user, query=_BEELINE_TEST_QUERY
+        )
+
+        # Inventory dinamico
+        inventory_content = "{} ansible_user={} ansible_ssh_private_key_file={}".format(
+            edge_host, ssh_user, ssh_key or "~/.ssh/id_rsa"
+        )
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode='w', suffix='.ini', delete=False, prefix='hs_inv_'
+            ) as inv_f:
+                inv_f.write(inventory_content)
+                inv_path = inv_f.name
+
+            with tempfile.NamedTemporaryFile(
+                mode='w', suffix='.yml', delete=False, prefix='hs_hive_'
+            ) as play_f:
+                play_f.write(
+                    "---\n"
+                    "- name: HiveCheck\n"
+                    "  hosts: all\n"
+                    "  gather_facts: false\n"
+                    "  tasks:\n"
+                    "    - name: Beeline test\n"
+                    "      shell: {}\n"
+                    "      register: r\n"
+                    "    - debug: var=r.stdout\n".format(beeline_cmd)
+                )
+                play_path = play_f.name
+
+            env = os.environ.copy()
+            env["ANSIBLE_HOST_KEY_CHECKING"] = "False"
+
+            proc = subprocess.Popen(
+                [ansible_bin, "-i", inv_path, play_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env
+            )
+            stdout, stderr = proc.communicate(timeout=60)
+            rc = proc.returncode
+
+            os.unlink(inv_path)
+            os.unlink(play_path)
+
+            if rc == 0:
+                return CheckResult(
+                    name="HiveCheck",
+                    status=CheckResult.OK,
+                    message="HiveServer2 responded to test query on {}:{}".format(
+                        hive_host, hive_port),
+                    details={"output": stdout.decode("utf-8", errors="replace")[:500]}
+                )
+            else:
+                err = stderr.decode("utf-8", errors="replace")[:500]
+                return CheckResult(
+                    name="HiveCheck",
+                    status=CheckResult.CRITICAL,
+                    message="Hive check failed (rc={}): {}".format(rc, err[:200]),
+                    details={"stderr": err}
+                )
+
+        except subprocess.TimeoutExpired:
+            return CheckResult(
+                name="HiveCheck",
+                status=CheckResult.UNKNOWN,
+                message="Hive check timed out (60s)"
+            )
+        except Exception as e:
+            return CheckResult(
+                name="HiveCheck",
+                status=CheckResult.UNKNOWN,
+                message="Hive check error: {}".format(str(e))
+            )
+
+    def _find_ansible(self):
+        # type: () -> str
+        """Trova il binary ansible da caps o dal PATH."""
+        import shutil
+        # Sistema
+        bin_path = shutil.which("ansible-playbook")
+        if bin_path:
+            return bin_path
+        # venv bootstrap
+        venv_bin = os.path.expanduser("~/.hadoopscope/venv/bin/ansible-playbook")
+        if os.path.exists(venv_bin):
+            return venv_bin
+        return None

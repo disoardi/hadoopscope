@@ -1,0 +1,14 @@
+{
+  "beans": [
+    {
+      "name": "Hadoop:service=NameNode,name=FSNamesystemState",
+      "modelerType": "FSNamesystemState",
+      "NumLiveDataNodes": 7,
+      "NumDeadDataNodes": 3,
+      "NumStaleDataNodes": 0,
+      "CapacityTotal": 107374182400,
+      "CapacityUsed": 32212254720,
+      "CapacityRemaining": 75161927680
+    }
+  ]
+}

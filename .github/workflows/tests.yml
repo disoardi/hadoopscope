@@ -1,0 +1,81 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.6", "3.9", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install PyYAML (optional, for convenience)
+        run: pip install pyyaml || true
+
+      - name: Run unit tests
+        run: python3 tests/test_base.py
+
+      - name: Run integration tests
+        run: python3 tests/test_checks.py
+
+      - name: Dry-run smoke test (text)
+        run: |
+          python3 hadoopscope.py \
+            --config config/test.yaml \
+            --env test-hdp \
+            --checks all \
+            --dry-run \
+            --output text
+
+      - name: Dry-run smoke test (json)
+        run: |
+          python3 hadoopscope.py \
+            --config config/test.yaml \
+            --env test-hdp \
+            --dry-run \
+            --output json
+
+      - name: Show capabilities
+        run: python3 hadoopscope.py --show-capabilities
+
+  test-no-pyyaml:
+    name: Zero-deps (no PyYAML)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: Run tests WITHOUT PyYAML
+        run: |
+          python3 -c "import yaml" 2>/dev/null && pip uninstall -y pyyaml || true
+          python3 tests/test_base.py
+          python3 hadoopscope.py \
+            --config config/test.yaml \
+            --env test-hdp \
+            --dry-run \
+            --output text
+
+  docker-test:
+    name: Docker integration test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker images
+        run: docker compose build
+      - name: Run integration tests via Docker
+        run: |
+          docker compose run --rm test-runner

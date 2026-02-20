@@ -1,0 +1,83 @@
+# HadoopScope — Test Config (dry-run / unit tests)
+# No real credentials — no env var required.
+# Use with: python3 hadoopscope.py --config config/test.yaml --env test-hdp --dry-run
+
+version: "1"
+
+environments:
+  test-hdp:
+    type: hdp
+    enabled: true
+    ambari_url: http://localhost:8080
+    ambari_user: admin
+    ambari_pass: dryrunonly
+    cluster_name: test-cluster
+    ambari_api_version: "v1"
+
+    webhdfs:
+      url: http://localhost:9870
+      user: hdfs
+      ssl: false
+
+    kerberos:
+      enabled: false
+
+  test-cdp:
+    type: cdp
+    enabled: true
+    cm_url: http://localhost:7180
+    cm_user: admin
+    cm_pass: dryrunonly
+    cluster_name: cdp-test
+    cm_api_version: "v40"
+
+    webhdfs:
+      url: http://localhost:9870
+      user: hdfs
+
+checks:
+  service_health:
+    enabled: true
+    services: [HDFS, YARN, HIVE, ZOOKEEPER]
+
+  namenode_ha:
+    enabled: true
+
+  hdfs_space:
+    enabled: true
+    paths:
+      - path: /user
+        warning_pct: 75
+        critical_pct: 90
+      - path: /tmp
+        warning_pct: 80
+        critical_pct: 95
+
+  hdfs_writability:
+    enabled: true
+    test_path: /tmp/.hadoopscope-probe
+
+  hdfs_dead_datanodes:
+    enabled: true
+    warning_threshold: 1
+    critical_threshold: 3
+
+  yarn_nodes:
+    enabled: true
+
+  yarn_queues:
+    enabled: true
+    usage_warning_pct: 80
+    usage_critical_pct: 90
+
+alerts:
+  email:
+    enabled: false
+
+  log:
+    enabled: true
+    format: text
+
+output:
+  format: text
+  verbosity: normal

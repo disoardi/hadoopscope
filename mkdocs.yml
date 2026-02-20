@@ -1,0 +1,59 @@
+site_name: HadoopScope
+site_description: Unified Hadoop cluster health monitoring — runs anywhere, requires nothing
+site_url: https://disoardi.github.io/hadoopscope
+repo_url: https://github.com/disoardi/hadoopscope
+repo_name: disoardi/hadoopscope
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: teal
+      accent: orange
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: teal
+      accent: orange
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.highlight
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started/installation.md
+    - Quickstart: getting-started/quickstart.md
+    - Configuration: getting-started/configuration.md
+  - Checks:
+    - Overview: checks/overview.md
+    - Ambari (HDP): checks/ambari.md
+    - Cloudera Manager (CDP): checks/cloudera.md
+    - HDFS / WebHDFS: checks/hdfs.md
+    - YARN: checks/yarn.md
+    - Hive: checks/hive.md
+  - Alerts: alerts.md
+  - CLI Reference: cli.md
+  - Architecture: architecture.md
+  - Development:
+    - Testing: dev/testing.md
+    - Contributing: dev/contributing.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - attr_list

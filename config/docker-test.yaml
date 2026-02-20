@@ -1,0 +1,60 @@
+# HadoopScope — Config per il test environment Docker
+# Usa mock-api come hostname (risolto da docker-compose network)
+
+version: "1"
+
+environments:
+  mock-hdp:
+    type: hdp
+    enabled: true
+    ambari_url: http://mock-api:8080
+    ambari_user: admin
+    ambari_pass: admin
+    cluster_name: test-cluster
+    ambari_api_version: "v1"
+
+    webhdfs:
+      url: http://mock-api:8080
+      user: hdfs
+
+    yarn:
+      rm_url: http://mock-api:8080
+
+  mock-cdp:
+    type: cdp
+    enabled: true
+    cm_url: http://mock-api:8080
+    cm_user: admin
+    cm_pass: admin
+    cluster_name: cdp-test
+    cm_api_version: "v40"
+
+    webhdfs:
+      url: http://mock-api:8080
+      user: hdfs
+
+checks:
+  service_health:
+    enabled: true
+
+  hdfs_space:
+    enabled: true
+    paths:
+      - path: /user
+        warning_pct: 75
+        critical_pct: 90
+
+  hdfs_dead_datanodes:
+    enabled: true
+    warning_threshold: 1
+    critical_threshold: 3
+
+  yarn_queues:
+    enabled: true
+    usage_warning_pct: 80
+    usage_critical_pct: 90
+
+alerts:
+  log:
+    enabled: true
+    format: text

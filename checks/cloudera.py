@@ -1,0 +1,177 @@
+"""Check Cloudera Manager REST API — CDP cluster health."""
+
+from __future__ import print_function
+
+import json
+import socket
+
+try:
+    from urllib.request import urlopen, Request
+    from urllib.error import URLError, HTTPError
+    import base64 as _base64
+    def _make_auth_header(user, passwd):
+        token = _base64.b64encode(
+            "{}:{}".format(user, passwd).encode()
+        ).decode()
+        return "Basic {}".format(token)
+except ImportError:
+    from urllib2 import urlopen, Request, URLError, HTTPError
+    import base64 as _base64
+    def _make_auth_header(user, passwd):
+        token = _base64.b64encode("{}:{}".format(user, passwd))
+        return "Basic {}".format(token)
+
+from checks.base import CheckBase, CheckResult
+
+TIMEOUT = 10
+
+
+class ClouderaClient(object):
+    """Client HTTP minimale per Cloudera Manager REST API. Zero deps."""
+
+    def __init__(self, base_url, user, password, cluster_name, api_version="v40"):
+        # type: (str, str, str, str, str) -> None
+        self.base_url     = base_url.rstrip("/")
+        self.auth_header  = _make_auth_header(user, password)
+        self.cluster_name = cluster_name
+        self.api_version  = api_version
+
+    def get(self, path):
+        # type: (str) -> dict
+        url = "{}/api/{}/clusters/{}/{}".format(
+            self.base_url, self.api_version, self.cluster_name, path.lstrip("/")
+        )
+        req = Request(url)
+        req.add_header("Authorization", self.auth_header)
+        req.add_header("Accept", "application/json")
+        try:
+            resp = urlopen(req, timeout=TIMEOUT)
+            return json.loads(resp.read().decode("utf-8"))
+        except HTTPError as e:
+            raise IOError("CM HTTP {}: {} — {}".format(e.code, e.reason, url))
+        except URLError as e:
+            raise IOError("CM connection error: {} — {}".format(e.reason, url))
+        except socket.timeout:
+            raise IOError("CM timeout ({}s) — {}".format(TIMEOUT, url))
+
+    def get_raw(self, path):
+        # type: (str) -> dict
+        """GET senza prefisso cluster — per endpoint globali."""
+        url = "{}/api/{}/{}".format(self.base_url, self.api_version, path.lstrip("/"))
+        req = Request(url)
+        req.add_header("Authorization", self.auth_header)
+        req.add_header("Accept", "application/json")
+        try:
+            resp = urlopen(req, timeout=TIMEOUT)
+            return json.loads(resp.read().decode("utf-8"))
+        except HTTPError as e:
+            raise IOError("CM HTTP {}: {} — {}".format(e.code, e.reason, url))
+        except URLError as e:
+            raise IOError("CM connection error: {} — {}".format(e.reason, url))
+        except socket.timeout:
+            raise IOError("CM timeout ({}s) — {}".format(TIMEOUT, url))
+
+
+def _make_cm_client(config):
+    # type: (dict) -> ClouderaClient
+    return ClouderaClient(
+        base_url     = config["cm_url"],
+        user         = config["cm_user"],
+        password     = config["cm_pass"],
+        cluster_name = config["cluster_name"],
+        api_version  = config.get("cm_api_version", "v40"),
+    )
+
+
+class ClouderaServiceHealthCheck(CheckBase):
+    """Controlla lo stato di tutti i servizi CDP via Cloudera Manager API."""
+
+    requires = []  # pura API REST
+
+    def run(self):
+        # type: () -> CheckResult
+        try:
+            client = _make_cm_client(self.config)
+            data   = client.get("services")
+        except IOError as e:
+            return CheckResult(
+                name="ClouderaServiceHealth",
+                status=CheckResult.UNKNOWN,
+                message=str(e)
+            )
+
+        services = data.get("items", [])
+        bad   = []
+        warn  = []
+
+        for svc in services:
+            name    = svc.get("name", "?")
+            display = svc.get("displayName", name)
+            health  = svc.get("healthSummary", "NOT_AVAILABLE")
+            state   = svc.get("serviceState", "UNKNOWN")
+
+            if health == "BAD":
+                bad.append("{} ({})".format(display, state))
+            elif health in ("CONCERNING", "NOT_AVAILABLE"):
+                warn.append("{}: {}".format(display, health))
+
+        if bad:
+            return CheckResult(
+                name="ClouderaServiceHealth",
+                status=CheckResult.CRITICAL,
+                message="BAD services: {}".format(", ".join(bad)),
+                details={"bad": bad, "concerning": warn}
+            )
+        if warn:
+            return CheckResult(
+                name="ClouderaServiceHealth",
+                status=CheckResult.WARNING,
+                message="Services with issues: {}".format(", ".join(warn)),
+                details={"concerning": warn}
+            )
+        return CheckResult(
+            name="ClouderaServiceHealth",
+            status=CheckResult.OK,
+            message="All {} services GOOD".format(len(services)),
+            details={"service_count": len(services)}
+        )
+
+
+class ClouderaParcelCheck(CheckBase):
+    """Verifica che tutti i parcel siano in stato ACTIVATED."""
+
+    requires = []
+
+    def run(self):
+        # type: () -> CheckResult
+        try:
+            client = _make_cm_client(self.config)
+            data   = client.get("parcels")
+        except IOError as e:
+            return CheckResult(
+                name="ClouderaParcels",
+                status=CheckResult.UNKNOWN,
+                message=str(e)
+            )
+
+        parcels = data.get("items", [])
+        not_activated = []
+        for p in parcels:
+            product = p.get("product", "?")
+            version = p.get("version", "?")
+            stage   = p.get("stage", "UNKNOWN")
+            if stage != "ACTIVATED":
+                not_activated.append("{}-{} ({})".format(product, version, stage))
+
+        if not_activated:
+            return CheckResult(
+                name="ClouderaParcels",
+                status=CheckResult.WARNING,
+                message="Non-activated parcels: {}".format(", ".join(not_activated)),
+                details={"not_activated": not_activated}
+            )
+        return CheckResult(
+            name="ClouderaParcels",
+            status=CheckResult.OK,
+            message="All {} parcel(s) ACTIVATED".format(len(parcels))
+        )

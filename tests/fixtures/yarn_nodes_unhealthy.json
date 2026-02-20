@@ -1,0 +1,9 @@
+{
+  "nodes": {
+    "node": [
+      {"id": "worker01:45678", "rack": "/default-rack", "state": "RUNNING", "healthStatus": "Healthy"},
+      {"id": "worker02:45678", "rack": "/default-rack", "state": "UNHEALTHY", "healthStatus": "Unhealthy: disk full"},
+      {"id": "worker03:45678", "rack": "/default-rack", "state": "LOST", "healthStatus": ""}
+    ]
+  }
+}

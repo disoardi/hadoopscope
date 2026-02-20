@@ -134,6 +134,92 @@ class AmbariServiceHealthCheck(CheckBase):
         )
 
 
+class ClusterAlertsCheck(CheckBase):
+    """Raccoglie alert CRITICAL attivi via Ambari API."""
+
+    requires = []
+
+    def run(self):
+        # type: () -> CheckResult
+        try:
+            client = _make_ambari_client(self.config)
+            data   = client.get(
+                "alerts?fields=*&Alert/state=CRITICAL&Alert/maintenance_state=OFF"
+            )
+        except IOError as e:
+            return CheckResult(
+                name="ClusterAlerts",
+                status=CheckResult.UNKNOWN,
+                message=str(e)
+            )
+
+        items = data.get("items", [])
+        if not items:
+            return CheckResult(
+                name="ClusterAlerts",
+                status=CheckResult.OK,
+                message="No active CRITICAL alerts"
+            )
+
+        summaries = []
+        for item in items[:10]:
+            alert = item.get("Alert", {})
+            label = alert.get("label", alert.get("definition_name", "?"))
+            host  = alert.get("host_name", "")
+            summaries.append("{} ({})".format(label, host) if host else label)
+
+        return CheckResult(
+            name="ClusterAlerts",
+            status=CheckResult.CRITICAL,
+            message="{} CRITICAL alert(s): {}".format(
+                len(items), "; ".join(summaries)),
+            details={"count": len(items), "alerts": summaries}
+        )
+
+
+class ConfigStalenessCheck(CheckBase):
+    """Verifica che non ci siano configurazioni stale non propagate ai nodi."""
+
+    requires = []
+
+    def run(self):
+        # type: () -> CheckResult
+        try:
+            client = _make_ambari_client(self.config)
+            data   = client.get(
+                "services?fields=ServiceInfo/config_staleness_check_issues,"
+                "ServiceInfo/service_name"
+            )
+        except IOError as e:
+            return CheckResult(
+                name="ConfigStaleness",
+                status=CheckResult.UNKNOWN,
+                message=str(e)
+            )
+
+        items = data.get("items", [])
+        stale = []
+        for item in items:
+            info   = item.get("ServiceInfo", {})
+            name   = info.get("service_name", "?")
+            issues = info.get("config_staleness_check_issues", [])
+            if issues:
+                stale.append(name)
+
+        if stale:
+            return CheckResult(
+                name="ConfigStaleness",
+                status=CheckResult.WARNING,
+                message="Stale config on services: {}".format(", ".join(stale)),
+                details={"stale_services": stale}
+            )
+        return CheckResult(
+            name="ConfigStaleness",
+            status=CheckResult.OK,
+            message="All service configs propagated"
+        )
+
+
 class NameNodeHACheck(CheckBase):
     """Verifica stato HA NameNode (active/standby)."""
 

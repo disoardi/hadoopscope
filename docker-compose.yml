@@ -1,0 +1,64 @@
+version: "3.8"
+
+# HadoopScope — Integration test environment
+# Avvia il mock API server e lancia i test di integrazione.
+#
+# Usage:
+#   docker compose up --build --abort-on-container-exit
+#   docker compose run hadoopscope --config /app/config/test.yaml --env mock-hdp --dry-run
+
+services:
+
+  # Mock API server — simula Ambari, YARN, WebHDFS, Cloudera Manager
+  mock-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.mock
+    ports:
+      - "18080:8080"   # Ambari / YARN / WebHDFS
+      - "17180:7180"   # Cloudera Manager
+    environment:
+      - SCENARIO=ok
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/v1/clusters/test-cluster/services')"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+      start_period: 2s
+
+  # HadoopScope tool — dry-run contro il mock server
+  hadoopscope:
+    build:
+      context: .
+    depends_on:
+      mock-api:
+        condition: service_healthy
+    volumes:
+      - ./config:/app/config:ro
+    environment:
+      - AMBARI_PASS=admin
+    command:
+      - --config
+      - /app/config/docker-test.yaml
+      - --env
+      - mock-hdp
+      - --checks
+      - all
+      - --dry-run
+      - --output
+      - text
+
+  # Test runner — lancia test_checks.py contro il mock server
+  test-runner:
+    build:
+      context: .
+    depends_on:
+      mock-api:
+        condition: service_healthy
+    volumes:
+      - .:/app:ro
+    working_dir: /app
+    environment:
+      - HADOOPSCOPE_TEST_API_URL=http://mock-api:8080
+    command: ["python3", "tests/run_all.py"]

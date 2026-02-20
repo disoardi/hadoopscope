@@ -1,0 +1,12 @@
+{
+  "items": [
+    {"name": "hdfs", "displayName": "HDFS", "type": "HDFS",
+     "serviceState": "STARTED", "healthSummary": "GOOD"},
+    {"name": "yarn", "displayName": "YARN", "type": "YARN",
+     "serviceState": "STARTED", "healthSummary": "GOOD"},
+    {"name": "hive", "displayName": "Hive", "type": "HIVE",
+     "serviceState": "STARTED", "healthSummary": "GOOD"},
+    {"name": "zookeeper", "displayName": "ZooKeeper", "type": "ZOOKEEPER",
+     "serviceState": "STARTED", "healthSummary": "GOOD"}
+  ]
+}

@@ -12,7 +12,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import load_config
-from bootstrap import discover_capabilities, ensure_ansible
+from bootstrap import discover_capabilities, ensure_ansible, print_capabilities
 from checks.base import CheckResult
 
 
@@ -26,11 +26,12 @@ Examples:
   %(prog)s --env prod-hdp
   %(prog)s --env prod-hdp --checks health
   %(prog)s --env prod-hdp --output json --dry-run
+  %(prog)s --show-capabilities
         """
     )
     p.add_argument("--config", default="config/hadoopscope.yaml",
                    help="Path to config file (default: config/hadoopscope.yaml)")
-    p.add_argument("--env", required=True, action="append", dest="envs",
+    p.add_argument("--env", action="append", dest="envs",
                    metavar="ENV", help="Environment to check (can repeat for multi-env)")
     p.add_argument("--checks", default="all",
                    choices=["all", "health", "hdfs", "hive", "yarn"],
@@ -40,31 +41,58 @@ Examples:
                    help="Output format (default: text)")
     p.add_argument("--dry-run", action="store_true",
                    help="Test config + connectivity without running checks")
-    p.add_argument("--version", action="version", version="HadoopScope 0.1.0-dev")
+    p.add_argument("--show-capabilities", action="store_true",
+                   help="Print capability map and exit")
+    p.add_argument("--verbose", action="store_true",
+                   help="Verbose output including capability map")
+    p.add_argument("--version", action="version", version="HadoopScope 0.1.0")
     return p
 
 
-def run_checks_for_env(env_name, env_config, global_config, caps, args):
-    # type: (str, dict, dict, dict, argparse.Namespace) -> list
-    """Seleziona e lancia i check per un singolo environment."""
-    from checks.ambari import AmbariServiceHealthCheck
+def build_check_registry(env_config, caps):
+    # type: (dict, dict) -> dict
+    """Costruisce il check_registry per l'environment dato."""
+    from checks.ambari import (
+        AmbariServiceHealthCheck, NameNodeHACheck,
+        ClusterAlertsCheck, ConfigStalenessCheck
+    )
     from checks.webhdfs import HdfsSpaceCheck, HdfsDataNodeCheck, HdfsWritabilityCheck
+    from checks.yarn import YarnNodeHealthCheck, YarnQueueCheck
+    from checks.hive import HiveCheck
+    from checks.cloudera import ClouderaServiceHealthCheck
 
-    results = []
+    env_type = env_config.get("type", "hdp")
 
-    # Mappa checks disponibili per tipo
-    check_registry = {
-        "health": [
+    if env_type == "cdp":
+        health_checks = [ClouderaServiceHealthCheck]
+    else:
+        health_checks = [
             AmbariServiceHealthCheck,
-        ],
+            NameNodeHACheck,
+            ClusterAlertsCheck,
+            ConfigStalenessCheck,
+        ]
+
+    return {
+        "health": health_checks,
         "hdfs": [
             HdfsSpaceCheck,
             HdfsDataNodeCheck,
             HdfsWritabilityCheck,
         ],
-        "hive": [],   # TODO: Giorno 4
-        "yarn": [],   # TODO: Giorno 4
+        "hive": [HiveCheck],
+        "yarn": [
+            YarnNodeHealthCheck,
+            YarnQueueCheck,
+        ],
     }
+
+
+def run_checks_for_env(env_name, env_config, global_config, caps, args):
+    # type: (str, dict, dict, dict, argparse.Namespace) -> list
+    """Seleziona e lancia i check per un singolo environment."""
+    results = []
+    check_registry = build_check_registry(env_config, caps)
 
     if args.checks == "all":
         check_classes = []
@@ -78,8 +106,10 @@ def run_checks_for_env(env_name, env_config, global_config, caps, args):
 
         if not instance.can_run():
             if instance.fallback is not None:
-                instance = instance.fallback(config=env_config, caps=caps)
-                if not instance.can_run():
+                fb_instance = instance.fallback(config=env_config, caps=caps)
+                if fb_instance.can_run():
+                    instance = fb_instance
+                else:
                     result = CheckResult(
                         name=CheckClass.__name__,
                         status=CheckResult.SKIPPED,
@@ -111,7 +141,7 @@ def run_checks_for_env(env_name, env_config, global_config, caps, args):
                 result = CheckResult(
                     name=instance.__class__.__name__,
                     status=CheckResult.UNKNOWN,
-                    message="Exception: {}".format(str(e))
+                    message="Unhandled exception: {}".format(str(e))
                 )
 
         results.append(result)
@@ -122,38 +152,61 @@ def run_checks_for_env(env_name, env_config, global_config, caps, args):
 def print_text_report(env_name, results, caps_used):
     # type: (str, list, list) -> None
     status_icons = {
-        CheckResult.OK:       "[OK]      ",
-        CheckResult.WARNING:  "[WARNING] ",
+        CheckResult.OK:       "[OK      ]",
+        CheckResult.WARNING:  "[WARNING ]",
         CheckResult.CRITICAL: "[CRITICAL]",
-        CheckResult.UNKNOWN:  "[UNKNOWN] ",
-        CheckResult.SKIPPED:  "[SKIPPED] ",
-        "DRY_RUN":            "[DRY-RUN] ",
+        CheckResult.UNKNOWN:  "[UNKNOWN ]",
+        CheckResult.SKIPPED:  "[SKIPPED ]",
+        "DRY_RUN":            "[DRY-RUN ]",
     }
 
-    counts = {s: 0 for s in [CheckResult.OK, CheckResult.WARNING,
-                               CheckResult.CRITICAL, CheckResult.UNKNOWN,
-                               CheckResult.SKIPPED, "DRY_RUN"]}
+    all_statuses = [CheckResult.OK, CheckResult.WARNING, CheckResult.CRITICAL,
+                    CheckResult.UNKNOWN, CheckResult.SKIPPED, "DRY_RUN"]
+    counts = {s: 0 for s in all_statuses}
 
     for r in results:
-        icon = status_icons.get(r.status, "[?]       ")
+        icon = status_icons.get(r.status, "[?       ]")
         print("{}  {} — {}".format(icon, r.name, r.message))
         counts[r.status] = counts.get(r.status, 0) + 1
 
     print()
     summary_parts = []
     for s in [CheckResult.CRITICAL, CheckResult.WARNING, CheckResult.OK,
-              CheckResult.UNKNOWN, CheckResult.SKIPPED]:
+              CheckResult.UNKNOWN, CheckResult.SKIPPED, "DRY_RUN"]:
         if counts.get(s, 0) > 0:
             summary_parts.append("{} {}".format(counts[s], s))
-    print("Summary: {}".format(", ".join(summary_parts)))
+    print("Summary: {}".format(", ".join(summary_parts) if summary_parts else "no checks run"))
 
     if caps_used:
-        print("Capabilities used: {}".format(", ".join(caps_used)))
+        print("Capabilities: {}".format(", ".join(sorted(caps_used))))
+
+
+def dispatch_alerts(results, cfg, env_name, output_format):
+    # type: (list, dict, str, str) -> None
+    """Lancia tutti gli alert handler configurati."""
+    from alerts import log_alert, email_alert, webhook_alert, zabbix_alert
+
+    log_alert.dispatch(results, cfg, env_name, output_format)
+    email_alert.dispatch(results, cfg, env_name)
+    webhook_alert.dispatch(results, cfg, env_name)
+    zabbix_alert.dispatch(results, cfg, env_name)
 
 
 def main():
     parser = build_arg_parser()
     args = parser.parse_args()
+
+    # Bootstrap — discover capabilities first (always, fast)
+    caps = discover_capabilities()
+
+    # --show-capabilities: stampa e esci senza caricare config
+    if args.show_capabilities:
+        print_capabilities(caps)
+        sys.exit(0)
+
+    # --env è required salvo --show-capabilities
+    if not args.envs:
+        parser.error("--env is required (use --show-capabilities to skip)")
 
     # Carica config
     try:
@@ -162,9 +215,11 @@ def main():
         print("ERROR loading config: {}".format(e), file=sys.stderr)
         sys.exit(1)
 
-    # Bootstrap
-    caps = discover_capabilities()
+    # Assicura Ansible disponibile se serve
     caps = ensure_ansible(caps)
+
+    if args.verbose:
+        print_capabilities(caps)
 
     all_results = {}
 
@@ -183,14 +238,22 @@ def main():
         all_results[env_name] = results
 
         if args.output == "text":
-            print("\nHadoopScope — {} @ {}".format(env_name, env_config.get("ambari_url", "")))
+            print("\nHadoopScope — {} @ {}".format(
+                env_name,
+                env_config.get("ambari_url") or env_config.get("cm_url", "")
+            ))
             print("=" * 60)
             caps_used = [k for k, v in caps.items() if v is True]
             print_text_report(env_name, results, caps_used)
 
+        # Dispatch alerts (salvo dry-run)
+        if not args.dry_run:
+            dispatch_alerts(results, cfg, env_name, args.output)
+
     if args.output == "json":
         output = {
             "version": "0.1.0",
+            "capabilities": {k: v for k, v in caps.items() if v},
             "environments": {}
         }
         for env_name, results in all_results.items():
@@ -200,6 +263,16 @@ def main():
                 for r in results
             ]
         print(json.dumps(output, indent=2))
+
+    # Exit code: 2 if any CRITICAL, 1 if any WARNING, 0 otherwise
+    worst = 0
+    for results in all_results.values():
+        for r in results:
+            if r.status == CheckResult.CRITICAL:
+                worst = 2
+            elif r.status == CheckResult.WARNING and worst < 2:
+                worst = 1
+    sys.exit(worst)
 
 
 if __name__ == "__main__":
