@@ -2,7 +2,9 @@
 
 from __future__ import print_function
 
+import json
 import os
+import re
 import subprocess
 import tempfile
 
@@ -77,6 +79,31 @@ def _merge_ns_cfg(hive_cfg, ns_entry):
     if "password" in ns_entry:
         merged["password"] = ns_entry["password"]
     return merged
+
+
+def _extract_task_error(ansible_stdout):
+    # type: (str) -> str
+    """Extract the actual task error from Ansible stdout.
+
+    Ansible wraps the task result as JSON after 'FAILED! => '.
+    We parse that JSON to get beeline's real stdout/stderr/msg
+    instead of returning the truncated Ansible header.
+    """
+    match = re.search(r"FAILED! => (\{.*)", ansible_stdout, re.DOTALL)
+    if not match:
+        return ansible_stdout[-800:]
+    try:
+        data = json.loads(match.group(1))
+        parts = []
+        if data.get("msg"):
+            parts.append("msg: {}".format(data["msg"]))
+        if data.get("stdout"):
+            parts.append("beeline stdout: {}".format(data["stdout"][:600]))
+        if data.get("stderr"):
+            parts.append("beeline stderr: {}".format(data["stderr"][:400]))
+        return "\n".join(parts) if parts else ansible_stdout[-800:]
+    except (ValueError, KeyError):
+        return ansible_stdout[-800:]
 
 
 class HiveCheck(CheckBase):
@@ -174,17 +201,19 @@ class HiveCheck(CheckBase):
         fail_msgs = []
         details = {}
         for f in failed:
-            combined = (f["out"] + f["err"]).strip()
             if f["rc"] == -1:
                 fail_msgs.append("{}: timeout".format(f["name"]))
+                task_error = "timeout after 60s"
             elif f["rc"] == -2:
                 fail_msgs.append("{}: error — {}".format(f["name"], f["err"][:100]))
+                task_error = f["err"]
             else:
-                fail_msgs.append("{}: rc={}".format(f["name"], f["rc"]))
+                task_error = _extract_task_error(f["out"])
+                fail_msgs.append("{}: rc={} — {}".format(
+                    f["name"], f["rc"], task_error[:200]))
             details[f["name"]] = {
                 "rc": f["rc"],
-                "stdout": f["out"][:500],
-                "stderr": f["err"][:200],
+                "error": task_error,
             }
         if ok_names:
             details["ok"] = ok_names
