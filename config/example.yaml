@@ -76,6 +76,8 @@ checks:
 
   namenode_ha:
     enabled: true
+    # ha_enabled: true   # Ambari 2.6.x non espone ha_state → imposta true se il cluster
+    #                    # ha HA attiva, per avere OK invece di WARNING
 
   hdfs_space:
     enabled: true

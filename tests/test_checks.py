@@ -332,6 +332,32 @@ def test_namenode_ha_ambari26_two_nn_warning():
         server.shutdown()
 
 
+def test_namenode_ha_ambari26_ha_enabled_config_ok():
+    """Ambari 2.6.x + ha_enabled: true nel config -> OK (l'utente garantisce che l'HA e' attiva)."""
+    fixture = {
+        "host_components": [
+            {"HostRoles": {"host_name": "nn1.test", "state": "STARTED", "ha_state": None}},
+            {"HostRoles": {"host_name": "nn2.test", "state": "STARTED", "ha_state": None}},
+        ]
+    }
+    route_map = {"/api/v1/clusters/": fixture}
+    server, port = start_mock_server(route_map)
+
+    config = {
+        "ambari_url": "http://127.0.0.1:{}".format(port),
+        "ambari_user": "admin", "ambari_pass": "admin",
+        "cluster_name": "test-cluster",
+        "checks": {"namenode_ha": {"ha_enabled": True}},
+    }
+    try:
+        result = NameNodeHACheck(config, {}).run()
+        assert result.status == CheckResult.OK, \
+            "ha_enabled:true should suppress WARNING: {}: {}".format(
+                result.status, result.message)
+    finally:
+        server.shutdown()
+
+
 # ---------------------------------------------------------------------------
 # Test: HdfsDataNodeCheck
 # ---------------------------------------------------------------------------
@@ -523,6 +549,7 @@ if __name__ == "__main__":
         test_namenode_ha_no_active,
         test_namenode_ha_non_ha_cluster,
         test_namenode_ha_ambari26_two_nn_warning,
+        test_namenode_ha_ambari26_ha_enabled_config_ok,
         test_hdfs_datanode_ok,
         test_hdfs_datanode_critical,
         test_hdfs_datanode_no_url,

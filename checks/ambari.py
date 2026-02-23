@@ -362,15 +362,27 @@ class NameNodeHACheck(CheckBase):
         # ha_state non disponibile (Ambari 2.6.x o HA non ancora sync)
         if not active and not standby and running_no_ha:
             if len(running_no_ha) >= 2:
-                # Due o piu' NN running ma ha_state null: probabile cluster HA
-                # ma Ambari 2.6.x non espone ha_state in HostRoles → WARNING
+                # Se l'utente dichiara esplicitamente ha_enabled: true nel config
+                # (Ambari 2.6.x non espone ha_state), fidarsi e restituire OK.
+                ha_cfg = self.config.get("checks", {}).get("namenode_ha", {})
+                if ha_cfg.get("ha_enabled", False):
+                    return CheckResult(
+                        name    = "NameNodeHA",
+                        status  = CheckResult.OK,
+                        message = "{} NameNodes STARTED, HA assumed OK (ha_state not "
+                                  "available from Ambari — set by config)".format(
+                                      len(running_no_ha)),
+                        details = {"hosts": running_no_ha, "ha_state_available": False,
+                                   "ha_enabled": True}
+                    )
+                # ha_enabled non configurato: WARNING perche' non possiamo verificare
                 return CheckResult(
                     name    = "NameNodeHA",
                     status  = CheckResult.WARNING,
                     message = (
                         "HA state undetermined: {} NameNodes STARTED but ha_state "
                         "not available from Ambari (likely OK — verify manually). "
-                        "Tip: run 'hdfs haadmin -getServiceState nn1' on the cluster."
+                        "Tip: add 'namenode_ha.ha_enabled: true' to config to suppress."
                     ).format(len(running_no_ha)),
                     details = {"hosts": running_no_ha, "ha_state_available": False}
                 )
