@@ -43,6 +43,25 @@ environments:
       # keytab: "${KEYTAB_PATH}"       # path assoluto al keytab
       # principal: monitor@CORP.COM    # principal del keytab (es. hdfs/namenode.corp.com@CORP.COM)
 
+    # ---------------------------------------------------------------------------
+    # YARN Resource Manager URL
+    # ---------------------------------------------------------------------------
+    # Se il YARN RM è su un host diverso da Ambari, specifica l'URL esplicitamente.
+    # Se omesso, HadoopScope prova a costruirlo da ambari_url:8088 (spesso sbagliato).
+    yarn:
+      rm_url: http://yarn-rm.corp.com:8088
+
+    # ---------------------------------------------------------------------------
+    # HTTP Proxy bypass
+    # ---------------------------------------------------------------------------
+    # Se il nodo che esegue HadoopScope ha HTTP_PROXY/HTTPS_PROXY configurati
+    # (tipico in ambienti corporate), le chiamate ai cluster interni vengono
+    # bloccate dal proxy con HTTP 403/URLBlocked.
+    # Imposta no_proxy: true per bypassare il proxy per questo environment.
+    # Equivalente a: export no_proxy="*" solo per queste chiamate.
+    no_proxy: false
+    # no_proxy: true   # abilita se ottieni "HTTP 403: URLBlocked" o "connection refused"
+
     ansible:
       edge_host: edge01.corp.com
       ssh_user: monitor

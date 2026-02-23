@@ -20,10 +20,18 @@ import os
 import subprocess
 
 try:
-    from urllib.request import urlopen, Request
+    from urllib.request import urlopen, Request, build_opener, ProxyHandler
     from urllib.error import URLError, HTTPError
 except ImportError:
-    from urllib2 import urlopen, Request, URLError, HTTPError
+    from urllib2 import urlopen, Request, build_opener, ProxyHandler, URLError, HTTPError
+
+
+def _open_url(req, timeout, no_proxy=False):
+    # type: (Request, int, bool) -> object
+    """Open URL, optionally bypassing system HTTP proxy."""
+    if no_proxy:
+        return build_opener(ProxyHandler({})).open(req, timeout=timeout)
+    return urlopen(req, timeout=timeout)
 
 from checks.base import CheckBase, CheckResult
 
@@ -58,10 +66,12 @@ def _kinit(keytab, principal, timeout=30):
         raise IOError("kinit non trovato nel PATH — installa krb5-user (Debian) o krb5-workstation (RHEL)")
 
 
-def _curl_get_json(url, negotiate=False, timeout=DEFAULT_TIMEOUT):
-    # type: (str, bool, int) -> dict
+def _curl_get_json(url, negotiate=False, timeout=DEFAULT_TIMEOUT, no_proxy=False):
+    # type: (str, bool, int, bool) -> dict
     """GET JSON via curl. Con negotiate=True usa SPNEGO (Kerberos)."""
     cmd = ["curl", "-s", "--fail", "--max-time", str(timeout)]
+    if no_proxy:
+        cmd += ["--noproxy", "*"]
     if negotiate:
         cmd += ["--negotiate", "-u", ":"]
     cmd.append(url)
@@ -77,18 +87,20 @@ def _curl_get_json(url, negotiate=False, timeout=DEFAULT_TIMEOUT):
         raise IOError("curl non trovato nel PATH — installa curl")
 
 
-def _curl_put_webhdfs(base_url, path, content, timeout=DEFAULT_TIMEOUT):
-    # type: (str, str, bytes, int) -> None
+def _curl_put_webhdfs(base_url, path, content, timeout=DEFAULT_TIMEOUT, no_proxy=False):
+    # type: (str, str, bytes, int, bool) -> None
     """PUT (CREATE) su WebHDFS via curl --negotiate. Segue il redirect 307 → DataNode."""
     url = "{}/webhdfs/v1{}?op=CREATE&overwrite=true".format(
         base_url.rstrip("/"), path
     )
-    cmd = ["curl", "-s", "--fail", "--max-time", str(timeout),
-           "--negotiate", "-u", ":",
-           "-X", "PUT", "-L",
-           "-H", "Content-Type: application/octet-stream",
-           "--data-binary", "@-",
-           url]
+    cmd = ["curl", "-s", "--fail", "--max-time", str(timeout)]
+    if no_proxy:
+        cmd += ["--noproxy", "*"]
+    cmd += ["--negotiate", "-u", ":",
+            "-X", "PUT", "-L",
+            "-H", "Content-Type: application/octet-stream",
+            "--data-binary", "@-",
+            url]
     try:
         proc = subprocess.Popen(
             cmd,
@@ -106,14 +118,16 @@ def _curl_put_webhdfs(base_url, path, content, timeout=DEFAULT_TIMEOUT):
         raise IOError("curl non trovato nel PATH")
 
 
-def _curl_delete_webhdfs(base_url, path, timeout=DEFAULT_TIMEOUT):
-    # type: (str, str, int) -> None
+def _curl_delete_webhdfs(base_url, path, timeout=DEFAULT_TIMEOUT, no_proxy=False):
+    # type: (str, str, int, bool) -> None
     """DELETE su WebHDFS via curl --negotiate."""
     url = "{}/webhdfs/v1{}?op=DELETE".format(base_url.rstrip("/"), path)
-    cmd = ["curl", "-s", "--fail", "--max-time", str(timeout),
-           "--negotiate", "-u", ":",
-           "-X", "DELETE",
-           url]
+    cmd = ["curl", "-s", "--fail", "--max-time", str(timeout)]
+    if no_proxy:
+        cmd += ["--noproxy", "*"]
+    cmd += ["--negotiate", "-u", ":",
+            "-X", "DELETE",
+            url]
     try:
         subprocess.check_call(cmd, stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL, timeout=timeout)
@@ -130,23 +144,24 @@ def _curl_delete_webhdfs(base_url, path, timeout=DEFAULT_TIMEOUT):
 # ---------------------------------------------------------------------------
 
 def _webhdfs_get(base_url, path, op, user, extra_params="",
-                 timeout=DEFAULT_TIMEOUT, kerberos=False):
-    # type: (str, str, str, str, str, int, bool) -> dict
+                 timeout=DEFAULT_TIMEOUT, kerberos=False, no_proxy=False):
+    # type: (str, str, str, str, str, int, bool, bool) -> dict
     """
     GET WebHDFS. Se kerberos=True usa curl --negotiate (SPNEGO).
     Se kerberos=False usa user.name nell'URL (simple auth).
+    no_proxy=True bypassa il proxy HTTP di sistema.
     """
     if kerberos:
         url = "{}/webhdfs/v1{}?op={}{}".format(
             base_url.rstrip("/"), path, op, extra_params
         )
-        return _curl_get_json(url, negotiate=True, timeout=timeout)
+        return _curl_get_json(url, negotiate=True, timeout=timeout, no_proxy=no_proxy)
 
     url = "{}/webhdfs/v1{}?op={}&user.name={}{}".format(
         base_url.rstrip("/"), path, op, user, extra_params
     )
     try:
-        resp = urlopen(Request(url), timeout=timeout)
+        resp = _open_url(Request(url), timeout=timeout, no_proxy=no_proxy)
         return json.loads(resp.read().decode("utf-8"))
     except HTTPError as e:
         raise IOError("WebHDFS HTTP {}: {}".format(e.code, e.reason))
@@ -184,6 +199,7 @@ class HdfsSpaceCheck(CheckBase):
         hdfs_cfg  = self.config.get("webhdfs", {})
         base_url  = hdfs_cfg.get("url", "")
         user      = hdfs_cfg.get("user", "hdfs")
+        no_proxy  = self.config.get("no_proxy", False)
         paths_cfg = self.config.get("checks", {}).get("hdfs_space", {}).get("paths", [])
 
         if not base_url:
@@ -191,6 +207,13 @@ class HdfsSpaceCheck(CheckBase):
                 name="HdfsSpace",
                 status=CheckResult.UNKNOWN,
                 message="webhdfs.url not configured"
+            )
+
+        if not paths_cfg:
+            return CheckResult(
+                name="HdfsSpace",
+                status=CheckResult.SKIPPED,
+                message="No paths configured — add checks.hdfs_space.paths to config"
             )
 
         use_krb, keytab, principal = _get_kerberos_cfg(self.config)
@@ -214,7 +237,7 @@ class HdfsSpaceCheck(CheckBase):
 
             try:
                 data    = _webhdfs_get(base_url, path, "GETCONTENTSUMMARY",
-                                       user, kerberos=use_krb)
+                                       user, kerberos=use_krb, no_proxy=no_proxy)
                 summary = data.get("ContentSummary", {})
                 used    = summary.get("spaceConsumed", 0)
                 quota   = summary.get("spaceQuota", -1)
@@ -275,6 +298,7 @@ class HdfsDataNodeCheck(CheckBase):
         # type: () -> CheckResult
         hdfs_cfg = self.config.get("webhdfs", {})
         base_url = hdfs_cfg.get("url", "")
+        no_proxy = self.config.get("no_proxy", False)
 
         if not base_url:
             return CheckResult(
@@ -301,9 +325,9 @@ class HdfsDataNodeCheck(CheckBase):
                         status=CheckResult.UNKNOWN,
                         message="Kerberos init failed: {}".format(str(e))
                     )
-                data = _curl_get_json(jmx_url, negotiate=True)
+                data = _curl_get_json(jmx_url, negotiate=True, no_proxy=no_proxy)
             else:
-                resp = urlopen(Request(jmx_url), timeout=DEFAULT_TIMEOUT)
+                resp = _open_url(Request(jmx_url), timeout=DEFAULT_TIMEOUT, no_proxy=no_proxy)
                 data = json.loads(resp.read().decode("utf-8"))
 
             beans    = data.get("beans", [{}])
@@ -365,6 +389,7 @@ class HdfsWritabilityCheck(CheckBase):
         hdfs_cfg  = self.config.get("webhdfs", {})
         base_url  = hdfs_cfg.get("url", "")
         user      = hdfs_cfg.get("user", "hdfs")
+        no_proxy  = self.config.get("no_proxy", False)
         test_path = self.config.get("checks", {}).get(
             "hdfs_writability", {}).get("test_path", "/tmp/.hadoopscope-probe")
 
@@ -391,21 +416,23 @@ class HdfsWritabilityCheck(CheckBase):
             test_path_ts = "{}-{}".format(test_path, int(time.time()))
 
             if use_krb:
-                _curl_put_webhdfs(base_url, test_path_ts, self.TEST_FILE_CONTENT)
-                _curl_delete_webhdfs(base_url, test_path_ts)
+                _curl_put_webhdfs(base_url, test_path_ts, self.TEST_FILE_CONTENT,
+                                  no_proxy=no_proxy)
+                _curl_delete_webhdfs(base_url, test_path_ts, no_proxy=no_proxy)
             else:
                 # Simple auth: urllib + gestione redirect 307
                 create_url = "{}/webhdfs/v1{}?op=CREATE&overwrite=true&user.name={}".format(
                     base_url.rstrip("/"), test_path_ts, user
                 )
                 try:
-                    urlopen(Request(create_url, data=b""), timeout=DEFAULT_TIMEOUT)
+                    _open_url(Request(create_url, data=b""), timeout=DEFAULT_TIMEOUT,
+                              no_proxy=no_proxy)
                 except HTTPError as e:
                     if e.code == 307:
                         location = e.headers.get("Location", "")
                         if location:
-                            urlopen(Request(location, data=self.TEST_FILE_CONTENT),
-                                    timeout=DEFAULT_TIMEOUT)
+                            _open_url(Request(location, data=self.TEST_FILE_CONTENT),
+                                      timeout=DEFAULT_TIMEOUT, no_proxy=no_proxy)
                         else:
                             raise
                     else:
@@ -414,7 +441,7 @@ class HdfsWritabilityCheck(CheckBase):
                 del_url = "{}/webhdfs/v1{}?op=DELETE&user.name={}".format(
                     base_url.rstrip("/"), test_path_ts, user
                 )
-                urlopen(Request(del_url), timeout=DEFAULT_TIMEOUT)
+                _open_url(Request(del_url), timeout=DEFAULT_TIMEOUT, no_proxy=no_proxy)
 
             return CheckResult(
                 name="HdfsWritability",

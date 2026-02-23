@@ -6,7 +6,7 @@ import json
 import socket
 
 try:
-    from urllib.request import urlopen, Request
+    from urllib.request import urlopen, Request, build_opener, ProxyHandler
     from urllib.error import URLError, HTTPError
     from urllib.parse import urljoin
     import base64 as _base64
@@ -14,13 +14,21 @@ try:
         token = _base64.b64encode("{}:{}".format(user, passwd).encode()).decode()
         return "Basic {}".format(token)
 except ImportError:
-    # Python 2 fallback (non dovrebbe servire ma per sicurezza)
-    from urllib2 import urlopen, Request, URLError, HTTPError
+    # Python 2 fallback
+    from urllib2 import urlopen, Request, build_opener, ProxyHandler, URLError, HTTPError
     from urlparse import urljoin
     import base64 as _base64
     def _make_auth_header(user, passwd):
         token = _base64.b64encode("{}:{}".format(user, passwd))
         return "Basic {}".format(token)
+
+
+def _open_url(req, timeout, no_proxy=False):
+    # type: (Request, int, bool) -> object
+    """Open URL, optionally bypassing system HTTP proxy."""
+    if no_proxy:
+        return build_opener(ProxyHandler({})).open(req, timeout=timeout)
+    return urlopen(req, timeout=timeout)
 
 from checks.base import CheckBase, CheckResult
 
@@ -30,12 +38,14 @@ class AmbariClient(object):
 
     TIMEOUT = 10  # secondi
 
-    def __init__(self, base_url, user, password, cluster_name, api_version="v1"):
-        # type: (str, str, str, str, str) -> None
+    def __init__(self, base_url, user, password, cluster_name,
+                 api_version="v1", no_proxy=False):
+        # type: (str, str, str, str, str, bool) -> None
         self.base_url     = base_url.rstrip("/")
         self.auth_header  = _make_auth_header(user, password)
         self.cluster_name = cluster_name
         self.api_version  = api_version
+        self.no_proxy     = no_proxy
 
     def get(self, path, params=None):
         # type: (str, dict) -> dict
@@ -52,7 +62,7 @@ class AmbariClient(object):
         req.add_header("X-Requested-By", "hadoopscope")
 
         try:
-            resp = urlopen(req, timeout=self.TIMEOUT)
+            resp = _open_url(req, self.TIMEOUT, no_proxy=self.no_proxy)
             return json.loads(resp.read().decode("utf-8"))
         except HTTPError as e:
             raise IOError("Ambari HTTP {}: {} — {}".format(e.code, e.reason, url))
@@ -70,6 +80,7 @@ def _make_ambari_client(config):
         password     = config["ambari_pass"],
         cluster_name = config["cluster_name"],
         api_version  = config.get("ambari_api_version", "v1"),
+        no_proxy     = config.get("no_proxy", False),
     )
 
 
@@ -237,7 +248,8 @@ class ConfigStalenessCheck(CheckBase):
             )
         except IOError as e:
             if "HTTP 400" in str(e):
-                # Ambari < 2.7: campo non supportato, usa config_state
+                # Ambari < 2.7: config_staleness_check_issues non supportato
+                # Prova fallback con config_state (Ambari 2.x)
                 staleness_field = "config_state"
                 try:
                     data = client.get(
@@ -245,6 +257,15 @@ class ConfigStalenessCheck(CheckBase):
                         "ServiceInfo/service_name"
                     )
                 except IOError as e2:
+                    if "HTTP 400" in str(e2):
+                        # Ambari 2.6.x: nessuno dei due campi è supportato
+                        return CheckResult(
+                            name="ConfigStaleness",
+                            status=CheckResult.SKIPPED,
+                            message="Config staleness not available on this Ambari version "
+                                    "(requires Ambari 2.7+ for config_staleness_check_issues "
+                                    "or Ambari 2.x with config_state field)"
+                        )
                     return CheckResult(
                         name="ConfigStaleness",
                         status=CheckResult.UNKNOWN,
@@ -338,11 +359,25 @@ class NameNodeHACheck(CheckBase):
                 # NN in esecuzione ma HA non abilitata (o ha_state non ancora sync)
                 running_no_ha.append(host)
 
-        # Cluster non-HA: NN running, nessun ha_state
+        # ha_state non disponibile (Ambari 2.6.x o HA non ancora sync)
         if not active and not standby and running_no_ha:
+            if len(running_no_ha) >= 2:
+                # Due o piu' NN running ma ha_state null: probabile cluster HA
+                # ma Ambari 2.6.x non espone ha_state in HostRoles → WARNING
+                return CheckResult(
+                    name    = "NameNodeHA",
+                    status  = CheckResult.WARNING,
+                    message = (
+                        "HA state undetermined: {} NameNodes STARTED but ha_state "
+                        "not available from Ambari (likely OK — verify manually). "
+                        "Tip: run 'hdfs haadmin -getServiceState nn1' on the cluster."
+                    ).format(len(running_no_ha)),
+                    details = {"hosts": running_no_ha, "ha_state_available": False}
+                )
+            # Singolo NN, nessun ha_state → cluster non-HA
             return CheckResult(
-                name   = "NameNodeHA",
-                status = CheckResult.OK,
+                name    = "NameNodeHA",
+                status  = CheckResult.OK,
                 message = "NameNode running (non-HA): {}".format(", ".join(running_no_ha)),
                 details = {"hosts": running_no_ha, "ha_enabled": False}
             )

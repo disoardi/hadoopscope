@@ -6,10 +6,18 @@ import json
 import socket
 
 try:
-    from urllib.request import urlopen, Request
+    from urllib.request import urlopen, Request, build_opener, ProxyHandler
     from urllib.error import URLError, HTTPError
 except ImportError:
-    from urllib2 import urlopen, Request, URLError, HTTPError
+    from urllib2 import urlopen, Request, build_opener, ProxyHandler, URLError, HTTPError
+
+
+def _open_url(req, timeout, no_proxy=False):
+    # type: (Request, int, bool) -> object
+    """Open URL, optionally bypassing system HTTP proxy."""
+    if no_proxy:
+        return build_opener(ProxyHandler({})).open(req, timeout=timeout)
+    return urlopen(req, timeout=timeout)
 
 from checks.base import CheckBase, CheckResult
 
@@ -18,36 +26,36 @@ DEFAULT_RM_PORT = 8088
 
 
 def _rm_url(config):
-    # type: (dict) -> str
+    # type: (dict) -> tuple
     """
-    Restituisce la URL del YARN Resource Manager.
+    Restituisce (url, is_auto) del YARN Resource Manager.
     Priorità: config[yarn][rm_url] > costruita da ambari_url:8088.
+    is_auto=True indica che l'URL è stato auto-costruito (non configurato esplicitamente).
     """
     yarn_cfg = config.get("yarn", {})
     if yarn_cfg.get("rm_url"):
-        return yarn_cfg["rm_url"].rstrip("/")
+        return yarn_cfg["rm_url"].rstrip("/"), False
 
     # Fallback: costruiamo dall'ambari_url sostituendo host e porta
     ambari_url = config.get("ambari_url", "http://localhost:8080")
-    # Estrai schema + host dall'url ambari (ignoriamo la porta)
     try:
         if "://" in ambari_url:
-            schema, rest = ambari_url.split("://", 1)
+            _, rest = ambari_url.split("://", 1)
             host = rest.split("/")[0].split(":")[0]
         else:
-            schema, host = "http", ambari_url.split("/")[0].split(":")[0]
-        return "http://{}:{}".format(host, DEFAULT_RM_PORT)
+            host = ambari_url.split("/")[0].split(":")[0]
+        return "http://{}:{}".format(host, DEFAULT_RM_PORT), True
     except Exception:
-        return "http://localhost:{}".format(DEFAULT_RM_PORT)
+        return "http://localhost:{}".format(DEFAULT_RM_PORT), True
 
 
-def _yarn_get(base_url, path, timeout=DEFAULT_TIMEOUT):
-    # type: (str, str, int) -> dict
+def _yarn_get(base_url, path, timeout=DEFAULT_TIMEOUT, no_proxy=False):
+    # type: (str, str, int, bool) -> dict
     url = "{}/ws/v1/cluster/{}".format(base_url, path.lstrip("/"))
     try:
         req = Request(url)
         req.add_header("Accept", "application/json")
-        resp = urlopen(req, timeout=timeout)
+        resp = _open_url(req, timeout=timeout, no_proxy=no_proxy)
         return json.loads(resp.read().decode("utf-8"))
     except HTTPError as e:
         raise IOError("YARN HTTP {}: {} — {}".format(e.code, e.reason, url))
@@ -64,14 +72,18 @@ class YarnNodeHealthCheck(CheckBase):
 
     def run(self):
         # type: () -> CheckResult
-        base = _rm_url(self.config)
+        base, is_auto = _rm_url(self.config)
+        no_proxy = self.config.get("no_proxy", False)
         try:
-            data = _yarn_get(base, "nodes")
+            data = _yarn_get(base, "nodes", no_proxy=no_proxy)
         except IOError as e:
+            msg = str(e)
+            if is_auto:
+                msg += " — Tip: set yarn.rm_url in config (auto-detected: {})".format(base)
             return CheckResult(
                 name="YarnNodeHealth",
                 status=CheckResult.UNKNOWN,
-                message=str(e)
+                message=msg
             )
 
         nodes = data.get("nodes", {}).get("node", [])
@@ -123,18 +135,22 @@ class YarnQueueCheck(CheckBase):
 
     def run(self):
         # type: () -> CheckResult
-        base = _rm_url(self.config)
+        base, is_auto = _rm_url(self.config)
+        no_proxy = self.config.get("no_proxy", False)
         yarn_cfg = self.config.get("checks", {}).get("yarn_queues", {})
         warn_pct = float(yarn_cfg.get("usage_warning_pct", 80))
         crit_pct = float(yarn_cfg.get("usage_critical_pct", 90))
 
         try:
-            data = _yarn_get(base, "scheduler")
+            data = _yarn_get(base, "scheduler", no_proxy=no_proxy)
         except IOError as e:
+            msg = str(e)
+            if is_auto:
+                msg += " — Tip: set yarn.rm_url in config (auto-detected: {})".format(base)
             return CheckResult(
                 name="YarnQueues",
                 status=CheckResult.UNKNOWN,
-                message=str(e)
+                message=msg
             )
 
         scheduler_info = data.get("scheduler", {}).get("schedulerInfo", {})

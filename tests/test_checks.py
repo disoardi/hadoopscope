@@ -306,6 +306,32 @@ def test_namenode_ha_non_ha_cluster():
         server.shutdown()
 
 
+def test_namenode_ha_ambari26_two_nn_warning():
+    """Ambari 2.6.x: 2 NN STARTED ma ha_state null -> WARNING (indeterminato, non falso OK)."""
+    fixture = {
+        "host_components": [
+            {"HostRoles": {"host_name": "nn1.test", "state": "STARTED", "ha_state": None}},
+            {"HostRoles": {"host_name": "nn2.test", "state": "STARTED", "ha_state": None}},
+        ]
+    }
+    route_map = {"/api/v1/clusters/": fixture}
+    server, port = start_mock_server(route_map)
+
+    config = {
+        "ambari_url": "http://127.0.0.1:{}".format(port),
+        "ambari_user": "admin", "ambari_pass": "admin",
+        "cluster_name": "test-cluster",
+    }
+    try:
+        result = NameNodeHACheck(config, {}).run()
+        assert result.status == CheckResult.WARNING, \
+            "2 NNs with no ha_state should be WARNING: {}: {}".format(
+                result.status, result.message)
+        assert "undetermined" in result.message.lower()
+    finally:
+        server.shutdown()
+
+
 # ---------------------------------------------------------------------------
 # Test: HdfsDataNodeCheck
 # ---------------------------------------------------------------------------
@@ -351,6 +377,18 @@ def test_hdfs_datanode_no_url():
     assert "not configured" in result.message
 
 
+def test_hdfs_space_no_paths_skipped():
+    """HdfsSpace senza paths configurati deve restituire SKIPPED con hint."""
+    config = {
+        "webhdfs": {"url": "http://127.0.0.1:19997", "user": "hdfs"},
+        # checks.hdfs_space.paths assente
+    }
+    result = HdfsSpaceCheck(config, {}).run()
+    assert result.status == CheckResult.SKIPPED, \
+        "No paths should be SKIPPED: {}: {}".format(result.status, result.message)
+    assert "hdfs_space.paths" in result.message
+
+
 # ---------------------------------------------------------------------------
 # Test: YarnNodeHealthCheck
 # ---------------------------------------------------------------------------
@@ -390,6 +428,18 @@ def test_yarn_nodes_connection_error():
     check  = YarnNodeHealthCheck(config, {})
     result = check.run()
     assert result.status == CheckResult.UNKNOWN
+
+
+def test_yarn_connection_error_suggests_rm_url():
+    """Quando URL è auto-costruito e la connessione fallisce, il messaggio suggerisce yarn.rm_url."""
+    config = {
+        "ambari_url": "http://127.0.0.1:8080",
+        # yarn.rm_url NON configurato -> verrà auto-costruito
+    }
+    result = YarnNodeHealthCheck(config, {}).run()
+    assert result.status == CheckResult.UNKNOWN
+    assert "yarn.rm_url" in result.message, \
+        "Auto-detected URL error should suggest yarn.rm_url: {}".format(result.message)
 
 
 # ---------------------------------------------------------------------------
@@ -472,12 +522,15 @@ if __name__ == "__main__":
         test_namenode_ha_ok,
         test_namenode_ha_no_active,
         test_namenode_ha_non_ha_cluster,
+        test_namenode_ha_ambari26_two_nn_warning,
         test_hdfs_datanode_ok,
         test_hdfs_datanode_critical,
         test_hdfs_datanode_no_url,
+        test_hdfs_space_no_paths_skipped,
         test_yarn_nodes_ok,
         test_yarn_nodes_unhealthy,
         test_yarn_nodes_connection_error,
+        test_yarn_connection_error_suggests_rm_url,
         test_cloudera_service_ok,
         test_config_manual_parser,
         test_config_load_test_yaml,
