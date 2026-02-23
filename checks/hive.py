@@ -2,7 +2,6 @@
 
 from __future__ import print_function
 
-import json
 import os
 import subprocess
 import tempfile
@@ -61,10 +60,45 @@ def _build_beeline_cmd(hive_cfg, default_user):
     ).format(url=url, auth=auth_str, query=_BEELINE_TEST_QUERY)
 
 
+def _merge_ns_cfg(hive_cfg, ns_entry):
+    # type: (dict, dict) -> dict
+    """Build per-namespace config by merging parent hive_cfg with namespace overrides.
+
+    Rules:
+    - zookeeper_hosts, host, port, database inherited from parent
+    - user: namespace override wins, else parent hive.user
+    - password: NOT inherited from parent — each namespace declares its own
+    - zookeeper_namespace: taken from ns_entry["name"]
+    """
+    merged = {k: v for k, v in hive_cfg.items() if k not in ("namespaces", "password")}
+    merged["zookeeper_namespace"] = ns_entry.get("name", "")
+    if "user" in ns_entry:
+        merged["user"] = ns_entry["user"]
+    if "password" in ns_entry:
+        merged["password"] = ns_entry["password"]
+    return merged
+
+
 class HiveCheck(CheckBase):
     """
     Controlla la disponibilità di HiveServer2 via beeline tramite Ansible.
     Richiede ansible (sistema o venv bootstrap) + accesso SSH all'edge node.
+
+    Config single-namespace (backward compat):
+      hive:
+        zookeeper_hosts: [zk1:2181, zk2:2181]
+        zookeeper_namespace: hiveserver2
+        user: hive
+
+    Config multi-namespace:
+      hive:
+        zookeeper_hosts: [zk1:2181, zk2:2181]
+        user: hive                         # default user, ereditato dai namespace
+        namespaces:
+          - name: hiveserver2              # no auth
+          - name: hiveserver2ldap          # LDAP — password esplicita
+            user: svcaccount              # opzionale: override user
+            password: "${HIVE_LDAP_PASS}"
     """
 
     requires = [["ansible"], ["venv_ansible"], ["docker_ansible_image"]]
@@ -77,7 +111,6 @@ class HiveCheck(CheckBase):
         ssh_user    = ansible_cfg.get("ssh_user", "hadoop")
         ssh_key     = ansible_cfg.get("ssh_key")
         hive_cfg    = self.config.get("hive", {})
-        hive_user   = hive_cfg.get("user", ssh_user)
 
         if not edge_host:
             return CheckResult(
@@ -86,7 +119,6 @@ class HiveCheck(CheckBase):
                 message="ansible.edge_host not configured"
             )
 
-        # Determina ansible binary
         ansible_bin = self._find_ansible()
         if not ansible_bin:
             return CheckResult(
@@ -95,24 +127,105 @@ class HiveCheck(CheckBase):
                 message="ansible binary not found despite can_run() check"
             )
 
-        beeline_cmd = _build_beeline_cmd(hive_cfg, hive_user)
+        inventory = self._build_inventory(edge_host, ssh_user, ssh_key)
 
-        # Inventory dinamico.
-        # Se edge_host è localhost usa connection=local (niente SSH su se stesso).
-        if edge_host in ("localhost", "127.0.0.1", "::1"):
-            inventory_content = "localhost ansible_connection=local"
+        # Determina le istanze da controllare
+        namespaces = hive_cfg.get("namespaces")
+        if namespaces:
+            # Multi-namespace: un'istanza per ogni entry
+            instances = [
+                (ns.get("name", "ns{}".format(i)), _merge_ns_cfg(hive_cfg, ns))
+                for i, ns in enumerate(namespaces)
+            ]
         else:
-            inventory_content = (
-                "{host} ansible_user={user} ansible_ssh_private_key_file={key}"
-            ).format(
-                host=edge_host,
-                user=ssh_user,
-                key=ssh_key or "~/.ssh/id_rsa"
+            # Single-instance (backward compat)
+            hive_user = hive_cfg.get("user", ssh_user)
+            label = hive_cfg.get("zookeeper_namespace") or "{}:{}".format(
+                hive_cfg.get("host", "localhost"), hive_cfg.get("port", 10000))
+            instances = [(label, hive_cfg)]
+
+        # Esegui beeline per ogni istanza
+        ok_names = []
+        failed = []
+        for inst_name, inst_cfg in instances:
+            inst_user = inst_cfg.get("user", ssh_user)
+            cmd = _build_beeline_cmd(inst_cfg, inst_user)
+            rc, out, err = self._run_playbook(ansible_bin, inventory, cmd)
+            if rc == 0:
+                ok_names.append(inst_name)
+            else:
+                failed.append({
+                    "name": inst_name,
+                    "rc": rc,
+                    "out": out,
+                    "err": err,
+                })
+
+        if not failed:
+            return CheckResult(
+                name="HiveCheck",
+                status=CheckResult.OK,
+                message="HiveServer2 OK ({} namespace(s): {})".format(
+                    len(ok_names), ", ".join(ok_names)),
+                details={"namespaces": ok_names}
             )
 
-        # Il comando beeline contiene virgolette singole — usare block scalar YAML (|)
-        # per evitare errori di parsing (Ansible rc=4).
-        playbook_content = (
+        # Almeno uno fallito
+        fail_msgs = []
+        details = {}
+        for f in failed:
+            combined = (f["out"] + f["err"]).strip()
+            if f["rc"] == -1:
+                fail_msgs.append("{}: timeout".format(f["name"]))
+            elif f["rc"] == -2:
+                fail_msgs.append("{}: error — {}".format(f["name"], f["err"][:100]))
+            else:
+                fail_msgs.append("{}: rc={}".format(f["name"], f["rc"]))
+            details[f["name"]] = {
+                "rc": f["rc"],
+                "stdout": f["out"][:500],
+                "stderr": f["err"][:200],
+            }
+        if ok_names:
+            details["ok"] = ok_names
+            summary = "{}/{} failed — {}".format(
+                len(failed), len(instances), "; ".join(fail_msgs))
+        else:
+            summary = "all namespaces failed — {}".format("; ".join(fail_msgs))
+
+        return CheckResult(
+            name="HiveCheck",
+            status=CheckResult.CRITICAL,
+            message="Hive check failed: {}".format(summary),
+            details=details
+        )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _build_inventory(self, edge_host, ssh_user, ssh_key):
+        # type: (str, str, str) -> str
+        if edge_host in ("localhost", "127.0.0.1", "::1"):
+            return "localhost ansible_connection=local"
+        return (
+            "{host} ansible_user={user} ansible_ssh_private_key_file={key}"
+        ).format(
+            host=edge_host,
+            user=ssh_user,
+            key=ssh_key or "~/.ssh/id_rsa"
+        )
+
+    def _run_playbook(self, ansible_bin, inventory_content, beeline_cmd):
+        # type: (str, str, str) -> tuple
+        """Run Ansible playbook with beeline command.
+
+        Returns (rc, stdout, stderr):
+          rc >= 0  : actual Ansible exit code
+          rc == -1 : subprocess timeout (60s)
+          rc == -2 : unexpected exception (err contains message)
+        """
+        playbook = (
             "---\n"
             "- name: HiveCheck\n"
             "  hosts: all\n"
@@ -125,18 +238,19 @@ class HiveCheck(CheckBase):
             "    - debug: var=r.stdout\n"
         ).format(cmd=beeline_cmd)
 
+        inv_path = play_path = None
         try:
             with tempfile.NamedTemporaryFile(
                 mode='w', suffix='.ini', delete=False, prefix='hs_inv_'
-            ) as inv_f:
-                inv_f.write(inventory_content)
-                inv_path = inv_f.name
+            ) as f:
+                f.write(inventory_content)
+                inv_path = f.name
 
             with tempfile.NamedTemporaryFile(
                 mode='w', suffix='.yml', delete=False, prefix='hs_hive_'
-            ) as play_f:
-                play_f.write(playbook_content)
-                play_path = play_f.name
+            ) as f:
+                f.write(playbook)
+                play_path = f.name
 
             env = os.environ.copy()
             env["ANSIBLE_HOST_KEY_CHECKING"] = "False"
@@ -148,54 +262,31 @@ class HiveCheck(CheckBase):
                 env=env
             )
             stdout, stderr = proc.communicate(timeout=60)
-            rc = proc.returncode
-
-            os.unlink(inv_path)
-            os.unlink(play_path)
-
-            out = stdout.decode("utf-8", errors="replace")
-            err = stderr.decode("utf-8", errors="replace")
-
-            if rc == 0:
-                jdbc_url = _build_beeline_url(hive_cfg)
-                return CheckResult(
-                    name="HiveCheck",
-                    status=CheckResult.OK,
-                    message="HiveServer2 responded to test query ({})".format(jdbc_url[:80]),
-                    details={"stdout": out[:500]}
-                )
-            else:
-                # Ansible scrive i dettagli degli errori su stdout (non stderr)
-                combined = (out + err).strip()
-                return CheckResult(
-                    name="HiveCheck",
-                    status=CheckResult.CRITICAL,
-                    message="Hive check failed (rc={}): {}".format(rc, combined[:400]),
-                    details={"stdout": out[:1000], "stderr": err[:500], "rc": rc}
-                )
+            return (
+                proc.returncode,
+                stdout.decode("utf-8", errors="replace"),
+                stderr.decode("utf-8", errors="replace"),
+            )
 
         except subprocess.TimeoutExpired:
-            return CheckResult(
-                name="HiveCheck",
-                status=CheckResult.UNKNOWN,
-                message="Hive check timed out (60s)"
-            )
+            return -1, "", "timeout after 60s"
         except Exception as e:
-            return CheckResult(
-                name="HiveCheck",
-                status=CheckResult.UNKNOWN,
-                message="Hive check error: {}".format(str(e))
-            )
+            return -2, "", str(e)
+        finally:
+            for p in (inv_path, play_path):
+                if p and os.path.exists(p):
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
 
     def _find_ansible(self):
         # type: () -> str
         """Trova il binary ansible da caps o dal PATH."""
         import shutil
-        # Sistema
         bin_path = shutil.which("ansible-playbook")
         if bin_path:
             return bin_path
-        # venv bootstrap
         venv_bin = os.path.expanduser("~/.hadoopscope/venv/bin/ansible-playbook")
         if os.path.exists(venv_bin):
             return venv_bin

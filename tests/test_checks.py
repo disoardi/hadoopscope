@@ -27,7 +27,7 @@ from checks.ambari import (
 from checks.webhdfs import HdfsDataNodeCheck, HdfsSpaceCheck
 from checks.yarn import YarnNodeHealthCheck, YarnQueueCheck
 from checks.cloudera import ClouderaServiceHealthCheck
-from checks.hive import _build_beeline_url, _build_beeline_cmd
+from checks.hive import _build_beeline_url, _build_beeline_cmd, _merge_ns_cfg
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -824,6 +824,55 @@ def test_beeline_cmd_default_user_fallback():
     assert "-n 'sshdefault'" in cmd
 
 
+def test_merge_ns_cfg_inherits_zk_hosts_and_user():
+    parent = {
+        "zookeeper_hosts": ["zk1:2181", "zk2:2181"],
+        "user": "hive",
+    }
+    ns = {"name": "hiveserver2"}
+    merged = _merge_ns_cfg(parent, ns)
+    assert merged["zookeeper_hosts"] == ["zk1:2181", "zk2:2181"]
+    assert merged["zookeeper_namespace"] == "hiveserver2"
+    assert merged["user"] == "hive"
+    assert "password" not in merged
+    assert "namespaces" not in merged
+
+
+def test_merge_ns_cfg_password_not_inherited():
+    parent = {
+        "zookeeper_hosts": ["zk1:2181"],
+        "user": "hive",
+        "password": "parent_secret",
+    }
+    ns = {"name": "hiveserver2"}
+    merged = _merge_ns_cfg(parent, ns)
+    # password from parent must NOT be inherited
+    assert "password" not in merged
+
+
+def test_merge_ns_cfg_ns_overrides_user_and_password():
+    parent = {
+        "zookeeper_hosts": ["zk1:2181"],
+        "user": "hive",
+    }
+    ns = {"name": "hiveserver2ldap", "user": "svcaccount", "password": "ldap_pass"}
+    merged = _merge_ns_cfg(parent, ns)
+    assert merged["zookeeper_namespace"] == "hiveserver2ldap"
+    assert merged["user"] == "svcaccount"
+    assert merged["password"] == "ldap_pass"
+
+
+def test_merge_ns_cfg_url_with_namespace():
+    parent = {"zookeeper_hosts": ["zk1:2181", "zk2:2181"], "user": "hive"}
+    ns = {"name": "hiveserver2ldap", "password": "pass"}
+    merged = _merge_ns_cfg(parent, ns)
+    url = _build_beeline_url(merged)
+    assert "serviceDiscoveryMode=zooKeeper" in url
+    assert "zooKeeperNamespace=hiveserver2ldap" in url
+    cmd = _build_beeline_cmd(merged, "hive")
+    assert "-p 'pass'" in cmd
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -874,6 +923,10 @@ if __name__ == "__main__":
         test_beeline_cmd_with_ldap_password,
         test_beeline_cmd_zk_with_namespace_no_auth,
         test_beeline_cmd_default_user_fallback,
+        test_merge_ns_cfg_inherits_zk_hosts_and_user,
+        test_merge_ns_cfg_password_not_inherited,
+        test_merge_ns_cfg_ns_overrides_user_and_password,
+        test_merge_ns_cfg_url_with_namespace,
     ]
     failed = 0
     for t in tests:
