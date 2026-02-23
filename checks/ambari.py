@@ -228,8 +228,8 @@ class ClusterAlertsCheck(CheckBase):
         return CheckResult(
             name="ClusterAlerts",
             status=CheckResult.CRITICAL,
-            message="{} CRITICAL alert(s): {}".format(
-                len(items), "; ".join(summaries)),
+            message="{} CRITICAL alert(s):\n  {}".format(
+                len(items), "\n  ".join(summaries)),
             details={"count": len(items), "alerts": summaries}
         )
 
