@@ -27,7 +27,7 @@ from checks.ambari import (
 from checks.webhdfs import HdfsDataNodeCheck, HdfsSpaceCheck
 from checks.yarn import YarnNodeHealthCheck, YarnQueueCheck
 from checks.cloudera import ClouderaServiceHealthCheck
-from checks.hive import _build_beeline_url, _build_beeline_cmd, _merge_ns_cfg
+from checks.hive import _build_beeline_url, _build_beeline_cmd, _merge_ns_cfg, _zk_host_str
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -873,6 +873,45 @@ def test_merge_ns_cfg_url_with_namespace():
     assert "-p 'pass'" in cmd
 
 
+def test_zk_host_str_from_string():
+    assert _zk_host_str("zk1:2181") == "zk1:2181"
+
+
+def test_zk_host_str_from_dict():
+    # Defensive: manual YAML parser may return {'host': port} for 'host:port'
+    assert _zk_host_str({"zk1": 2181}) == "zk1:2181"
+
+
+def test_beeline_url_zk_dict_items():
+    # Simulate what the manual YAML parser produces for unquoted host:port items
+    cfg = {"zookeeper_hosts": [
+        {"hdmasep001.example.com": 2181},
+        {"hdmasep002.example.com": 2181},
+    ]}
+    url = _build_beeline_url(cfg)
+    assert url == "jdbc:hive2://hdmasep001.example.com:2181,hdmasep002.example.com:2181/", url
+
+
+def test_beeline_cmd_custom_path():
+    cfg = {"host": "hs2", "port": 10000, "beeline_path": "/opt/hive/bin/beeline"}
+    cmd = _build_beeline_cmd(cfg, "hive")
+    assert cmd.startswith("/opt/hive/bin/beeline"), cmd
+
+
+def test_yaml_parser_hostport_as_string():
+    from config import _parse_yaml_manual
+    yaml_text = (
+        "zookeeper_hosts:\n"
+        "  - hdmasep001.example.com:2181\n"
+        "  - hdmasep002.example.com:2181\n"
+    )
+    result = _parse_yaml_manual(yaml_text)
+    assert result["zookeeper_hosts"] == [
+        "hdmasep001.example.com:2181",
+        "hdmasep002.example.com:2181",
+    ], result["zookeeper_hosts"]
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -927,6 +966,11 @@ if __name__ == "__main__":
         test_merge_ns_cfg_password_not_inherited,
         test_merge_ns_cfg_ns_overrides_user_and_password,
         test_merge_ns_cfg_url_with_namespace,
+        test_zk_host_str_from_string,
+        test_zk_host_str_from_dict,
+        test_beeline_url_zk_dict_items,
+        test_beeline_cmd_custom_path,
+        test_yaml_parser_hostport_as_string,
     ]
     failed = 0
     for t in tests:

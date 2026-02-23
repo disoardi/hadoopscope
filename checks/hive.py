@@ -14,6 +14,19 @@ from checks.base import CheckBase, CheckResult
 _BEELINE_TEST_QUERY = "SELECT 1;"
 
 
+def _zk_host_str(item):
+    # type: (object) -> str
+    """Format a ZK host item that may arrive as string or dict {host: port}.
+
+    The manual YAML parser incorrectly parses 'host:port' (no space after colon)
+    as a mapping {host: port}. This helper handles both forms defensively.
+    """
+    if isinstance(item, dict) and len(item) == 1:
+        host, port = list(item.items())[0]
+        return "{}:{}".format(host, port)
+    return str(item)
+
+
 def _build_beeline_url(hive_cfg):
     # type: (dict) -> str
     """Build JDBC URL for beeline.
@@ -27,7 +40,7 @@ def _build_beeline_url(hive_cfg):
     zk_hosts = hive_cfg.get("zookeeper_hosts")
     if zk_hosts:
         if isinstance(zk_hosts, list):
-            zk_str = ",".join(str(h) for h in zk_hosts)
+            zk_str = ",".join(_zk_host_str(h) for h in zk_hosts)
         else:
             zk_str = str(zk_hosts)
         url = "jdbc:hive2://{}/".format(zk_str)
@@ -48,18 +61,20 @@ def _build_beeline_cmd(hive_cfg, default_user):
 
     Auth: if hive.password is set, adds -p flag (LDAP/PAM).
     Uses double quotes around JDBC URL to handle commas and semicolons.
+    beeline_path: full path to beeline binary (default: 'beeline', assumes PATH).
     """
-    url  = _build_beeline_url(hive_cfg)
-    user = hive_cfg.get("user", default_user)
-    pwd  = hive_cfg.get("password")
+    url      = _build_beeline_url(hive_cfg)
+    user     = hive_cfg.get("user", default_user)
+    pwd      = hive_cfg.get("password")
+    beeline  = hive_cfg.get("beeline_path", "beeline")
     if pwd:
         auth_str = "-n '{user}' -p '{pwd}'".format(user=user, pwd=pwd)
     else:
         auth_str = "-n '{user}'".format(user=user)
     return (
-        'beeline -u "{url}" {auth}'
+        '{beeline} -u "{url}" {auth}'
         " -e '{query}' --silent=true --outputformat=csv2"
-    ).format(url=url, auth=auth_str, query=_BEELINE_TEST_QUERY)
+    ).format(beeline=beeline, url=url, auth=auth_str, query=_BEELINE_TEST_QUERY)
 
 
 def _merge_ns_cfg(hive_cfg, ns_entry):

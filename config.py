@@ -351,7 +351,7 @@ def _parse_list(lines, start, base_indent):
                     result.append(value)
                 else:
                     result.append(None)
-            elif ':' in item_text:
+            elif ': ' in item_text or item_text.endswith(':'):
                 sub_line = ' ' * (indent + 2) + item_text
                 sub_result, _ = _parse_block([sub_line] + lines[i + 1:], 0, indent + 2)
                 i += 1
