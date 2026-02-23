@@ -27,6 +27,7 @@ from checks.ambari import (
 from checks.webhdfs import HdfsDataNodeCheck, HdfsSpaceCheck
 from checks.yarn import YarnNodeHealthCheck, YarnQueueCheck
 from checks.cloudera import ClouderaServiceHealthCheck
+from checks.hive import _build_beeline_url, _build_beeline_cmd
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -748,6 +749,82 @@ def test_config_load_test_yaml():
 
 
 # ---------------------------------------------------------------------------
+# HiveCheck — _build_beeline_url / _build_beeline_cmd
+# ---------------------------------------------------------------------------
+
+def test_beeline_url_direct():
+    cfg = {"host": "hiveserver2.example.com", "port": 10000, "database": "default"}
+    url = _build_beeline_url(cfg)
+    assert url == "jdbc:hive2://hiveserver2.example.com:10000/default", url
+
+
+def test_beeline_url_direct_defaults():
+    url = _build_beeline_url({})
+    assert url == "jdbc:hive2://localhost:10000/default", url
+
+
+def test_beeline_url_zk_list_no_namespace():
+    cfg = {"zookeeper_hosts": ["zk1:2181", "zk2:2181", "zk3:2181"]}
+    url = _build_beeline_url(cfg)
+    assert url == "jdbc:hive2://zk1:2181,zk2:2181,zk3:2181/", url
+    assert "serviceDiscovery" not in url
+
+
+def test_beeline_url_zk_list_with_namespace():
+    cfg = {
+        "zookeeper_hosts": ["zk1:2181", "zk2:2181"],
+        "zookeeper_namespace": "hiveserver2ldap",
+    }
+    url = _build_beeline_url(cfg)
+    assert url == (
+        "jdbc:hive2://zk1:2181,zk2:2181/"
+        ";serviceDiscoveryMode=zooKeeper;zooKeeperNamespace=hiveserver2ldap"
+    ), url
+
+
+def test_beeline_url_zk_string_single():
+    cfg = {"zookeeper_hosts": "zk1:2181"}
+    url = _build_beeline_url(cfg)
+    assert url == "jdbc:hive2://zk1:2181/", url
+
+
+def test_beeline_cmd_no_auth():
+    cfg = {"host": "hs2.example.com", "port": 10000, "database": "default", "user": "hive"}
+    cmd = _build_beeline_cmd(cfg, "hadoop")
+    assert 'beeline -u "jdbc:hive2://hs2.example.com:10000/default"' in cmd
+    assert "-n 'hive'" in cmd
+    assert "-p" not in cmd
+    assert "-e 'SELECT 1;'" in cmd
+
+
+def test_beeline_cmd_with_ldap_password():
+    cfg = {"host": "hs2.example.com", "port": 10000, "user": "svcuser", "password": "s3cr3t"}
+    cmd = _build_beeline_cmd(cfg, "hadoop")
+    assert "-n 'svcuser'" in cmd
+    assert "-p 's3cr3t'" in cmd
+
+
+def test_beeline_cmd_zk_with_namespace_no_auth():
+    cfg = {
+        "zookeeper_hosts": ["hdmasep001:2181", "hdmasep002:2181", "hdmasep003:2181"],
+        "zookeeper_namespace": "hiveserver2ldap",
+        "user": "hive",
+    }
+    cmd = _build_beeline_cmd(cfg, "hadoop")
+    assert 'beeline -u "jdbc:hive2://hdmasep001:2181,hdmasep002:2181,hdmasep003:2181/' in cmd
+    assert "serviceDiscoveryMode=zooKeeper" in cmd
+    assert "zooKeeperNamespace=hiveserver2ldap" in cmd
+    assert "-n 'hive'" in cmd
+    assert "-p" not in cmd
+
+
+def test_beeline_cmd_default_user_fallback():
+    cfg = {"host": "hs2.example.com", "port": 10000}
+    cmd = _build_beeline_cmd(cfg, "sshdefault")
+    assert "-n 'sshdefault'" in cmd
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -788,6 +865,15 @@ if __name__ == "__main__":
         test_cloudera_service_ok,
         test_config_manual_parser,
         test_config_load_test_yaml,
+        test_beeline_url_direct,
+        test_beeline_url_direct_defaults,
+        test_beeline_url_zk_list_no_namespace,
+        test_beeline_url_zk_list_with_namespace,
+        test_beeline_url_zk_string_single,
+        test_beeline_cmd_no_auth,
+        test_beeline_cmd_with_ldap_password,
+        test_beeline_cmd_zk_with_namespace_no_auth,
+        test_beeline_cmd_default_user_fallback,
     ]
     failed = 0
     for t in tests:

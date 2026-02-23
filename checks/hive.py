@@ -11,28 +11,54 @@ from checks.base import CheckBase, CheckResult
 
 
 _BEELINE_TEST_QUERY = "SELECT 1;"
-_BEELINE_SCRIPT_TEMPLATE = """#!/bin/bash
-set -e
-beeline -u 'jdbc:hive2://{host}:{port}/{db}' \\
-        -n '{user}' \\
-        -e '{query}' \\
-        --silent=true \\
-        --outputformat=csv2 2>&1
-"""
 
-_ANSIBLE_PLAYBOOK_TEMPLATE = """---
-- name: HadoopScope Hive check
-  hosts: edge
-  gather_facts: false
-  tasks:
-    - name: Run Hive test query
-      shell: |
-        {beeline_cmd}
-      register: result
-    - name: Show result
-      debug:
-        var: result.stdout
-"""
+
+def _build_beeline_url(hive_cfg):
+    # type: (dict) -> str
+    """Build JDBC URL for beeline.
+
+    ZooKeeper mode (if zookeeper_hosts is set):
+      jdbc:hive2://zk1:2181,zk2:2181/[;serviceDiscoveryMode=zooKeeper;zooKeeperNamespace=<ns>]
+
+    Direct mode (fallback):
+      jdbc:hive2://host:port/database
+    """
+    zk_hosts = hive_cfg.get("zookeeper_hosts")
+    if zk_hosts:
+        if isinstance(zk_hosts, list):
+            zk_str = ",".join(str(h) for h in zk_hosts)
+        else:
+            zk_str = str(zk_hosts)
+        url = "jdbc:hive2://{}/".format(zk_str)
+        zk_ns = hive_cfg.get("zookeeper_namespace")
+        if zk_ns:
+            url += ";serviceDiscoveryMode=zooKeeper;zooKeeperNamespace={}".format(zk_ns)
+    else:
+        host = hive_cfg.get("host", "localhost")
+        port = hive_cfg.get("port", 10000)
+        db   = hive_cfg.get("database", "default")
+        url  = "jdbc:hive2://{}:{}/{}".format(host, port, db)
+    return url
+
+
+def _build_beeline_cmd(hive_cfg, default_user):
+    # type: (dict, str) -> str
+    """Build beeline shell command string.
+
+    Auth: if hive.password is set, adds -p flag (LDAP/PAM).
+    Uses double quotes around JDBC URL to handle commas and semicolons.
+    """
+    url  = _build_beeline_url(hive_cfg)
+    user = hive_cfg.get("user", default_user)
+    pwd  = hive_cfg.get("password")
+    if pwd:
+        auth_str = "-n '{user}' -p '{pwd}'".format(user=user, pwd=pwd)
+    else:
+        auth_str = "-n '{user}'".format(user=user)
+    return (
+        'beeline -u "{url}" {auth}'
+        " -e '{query}' --silent=true --outputformat=csv2"
+    ).format(url=url, auth=auth_str, query=_BEELINE_TEST_QUERY)
 
 
 class HiveCheck(CheckBase):
@@ -51,9 +77,6 @@ class HiveCheck(CheckBase):
         ssh_user    = ansible_cfg.get("ssh_user", "hadoop")
         ssh_key     = ansible_cfg.get("ssh_key")
         hive_cfg    = self.config.get("hive", {})
-        hive_host   = hive_cfg.get("host", edge_host or "localhost")
-        hive_port   = hive_cfg.get("port", 10000)
-        hive_db     = hive_cfg.get("database", "default")
         hive_user   = hive_cfg.get("user", ssh_user)
 
         if not edge_host:
@@ -72,13 +95,7 @@ class HiveCheck(CheckBase):
                 message="ansible binary not found despite can_run() check"
             )
 
-        beeline_cmd = (
-            "beeline -u 'jdbc:hive2://{host}:{port}/{db}' "
-            "-n '{user}' -e '{query}' --silent=true --outputformat=csv2"
-        ).format(
-            host=hive_host, port=hive_port,
-            db=hive_db, user=hive_user, query=_BEELINE_TEST_QUERY
-        )
+        beeline_cmd = _build_beeline_cmd(hive_cfg, hive_user)
 
         # Inventory dinamico.
         # Se edge_host è localhost usa connection=local (niente SSH su se stesso).
@@ -140,11 +157,11 @@ class HiveCheck(CheckBase):
             err = stderr.decode("utf-8", errors="replace")
 
             if rc == 0:
+                jdbc_url = _build_beeline_url(hive_cfg)
                 return CheckResult(
                     name="HiveCheck",
                     status=CheckResult.OK,
-                    message="HiveServer2 responded to test query on {}:{}".format(
-                        hive_host, hive_port),
+                    message="HiveServer2 responded to test query ({})".format(jdbc_url[:80]),
                     details={"stdout": out[:500]}
                 )
             else:
