@@ -80,10 +80,33 @@ class HiveCheck(CheckBase):
             db=hive_db, user=hive_user, query=_BEELINE_TEST_QUERY
         )
 
-        # Inventory dinamico
-        inventory_content = "{} ansible_user={} ansible_ssh_private_key_file={}".format(
-            edge_host, ssh_user, ssh_key or "~/.ssh/id_rsa"
-        )
+        # Inventory dinamico.
+        # Se edge_host è localhost usa connection=local (niente SSH su se stesso).
+        if edge_host in ("localhost", "127.0.0.1", "::1"):
+            inventory_content = "localhost ansible_connection=local"
+        else:
+            inventory_content = (
+                "{host} ansible_user={user} ansible_ssh_private_key_file={key}"
+            ).format(
+                host=edge_host,
+                user=ssh_user,
+                key=ssh_key or "~/.ssh/id_rsa"
+            )
+
+        # Il comando beeline contiene virgolette singole — usare block scalar YAML (|)
+        # per evitare errori di parsing (Ansible rc=4).
+        playbook_content = (
+            "---\n"
+            "- name: HiveCheck\n"
+            "  hosts: all\n"
+            "  gather_facts: false\n"
+            "  tasks:\n"
+            "    - name: Beeline test\n"
+            "      shell: |\n"
+            "        {cmd}\n"
+            "      register: r\n"
+            "    - debug: var=r.stdout\n"
+        ).format(cmd=beeline_cmd)
 
         try:
             with tempfile.NamedTemporaryFile(
@@ -95,17 +118,7 @@ class HiveCheck(CheckBase):
             with tempfile.NamedTemporaryFile(
                 mode='w', suffix='.yml', delete=False, prefix='hs_hive_'
             ) as play_f:
-                play_f.write(
-                    "---\n"
-                    "- name: HiveCheck\n"
-                    "  hosts: all\n"
-                    "  gather_facts: false\n"
-                    "  tasks:\n"
-                    "    - name: Beeline test\n"
-                    "      shell: {}\n"
-                    "      register: r\n"
-                    "    - debug: var=r.stdout\n".format(beeline_cmd)
-                )
+                play_f.write(playbook_content)
                 play_path = play_f.name
 
             env = os.environ.copy()
@@ -123,21 +136,25 @@ class HiveCheck(CheckBase):
             os.unlink(inv_path)
             os.unlink(play_path)
 
+            out = stdout.decode("utf-8", errors="replace")
+            err = stderr.decode("utf-8", errors="replace")
+
             if rc == 0:
                 return CheckResult(
                     name="HiveCheck",
                     status=CheckResult.OK,
                     message="HiveServer2 responded to test query on {}:{}".format(
                         hive_host, hive_port),
-                    details={"output": stdout.decode("utf-8", errors="replace")[:500]}
+                    details={"stdout": out[:500]}
                 )
             else:
-                err = stderr.decode("utf-8", errors="replace")[:500]
+                # Ansible scrive i dettagli degli errori su stdout (non stderr)
+                combined = (out + err).strip()
                 return CheckResult(
                     name="HiveCheck",
                     status=CheckResult.CRITICAL,
-                    message="Hive check failed (rc={}): {}".format(rc, err[:200]),
-                    details={"stderr": err}
+                    message="Hive check failed (rc={}): {}".format(rc, combined[:400]),
+                    details={"stdout": out[:1000], "stderr": err[:500], "rc": rc}
                 )
 
         except subprocess.TimeoutExpired:
