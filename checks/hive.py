@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 
 from checks.base import CheckBase, CheckResult
+import debug as _debug
 
 
 _BEELINE_TEST_QUERY = "SELECT 1;"
@@ -190,13 +191,19 @@ class HiveCheck(CheckBase):
                 hive_cfg.get("host", "localhost"), hive_cfg.get("port", 10000))
             instances = [(label, hive_cfg)]
 
+        _debug.log("HiveCheck", "ansible_bin: {}".format(ansible_bin))
+        _debug.log("HiveCheck", "edge_host: {}".format(edge_host))
+        _debug.log("HiveCheck", "inventory: {}".format(inventory))
+
         # Esegui beeline per ogni istanza
         ok_names = []
         failed = []
         for inst_name, inst_cfg in instances:
             inst_user = inst_cfg.get("user", ssh_user)
             cmd = _build_beeline_cmd(inst_cfg, inst_user)
-            rc, out, err = self._run_playbook(ansible_bin, inventory, cmd)
+            tag = "HiveCheck[{}]".format(inst_name)
+            _debug.log(tag, "beeline_cmd: {}".format(cmd))
+            rc, out, err = self._run_playbook(ansible_bin, inventory, cmd, tag)
             if rc == 0:
                 ok_names.append(inst_name)
             else:
@@ -264,8 +271,8 @@ class HiveCheck(CheckBase):
             key=ssh_key or "~/.ssh/id_rsa"
         )
 
-    def _run_playbook(self, ansible_bin, inventory_content, beeline_cmd):
-        # type: (str, str, str) -> tuple
+    def _run_playbook(self, ansible_bin, inventory_content, beeline_cmd, tag="HiveCheck"):
+        # type: (str, str, str, str) -> tuple
         """Run Ansible playbook with beeline command.
 
         Returns (rc, stdout, stderr):
@@ -300,6 +307,10 @@ class HiveCheck(CheckBase):
                 f.write(playbook)
                 play_path = f.name
 
+            _debug.log(tag, "playbook: {}".format(play_path), multiline=False)
+            _debug.section(tag, "playbook content")
+            _debug.log(tag, playbook, multiline=True)
+
             env = os.environ.copy()
             env["ANSIBLE_HOST_KEY_CHECKING"] = "False"
 
@@ -310,11 +321,15 @@ class HiveCheck(CheckBase):
                 env=env
             )
             stdout, stderr = proc.communicate(timeout=60)
-            return (
-                proc.returncode,
-                stdout.decode("utf-8", errors="replace"),
-                stderr.decode("utf-8", errors="replace"),
-            )
+            out = stdout.decode("utf-8", errors="replace")
+            err = stderr.decode("utf-8", errors="replace")
+            _debug.log(tag, "rc: {}".format(proc.returncode))
+            _debug.section(tag, "ansible stdout")
+            _debug.log(tag, out if out.strip() else "(empty)", multiline=True)
+            if err.strip():
+                _debug.section(tag, "ansible stderr")
+                _debug.log(tag, err, multiline=True)
+            return (proc.returncode, out, err)
 
         except subprocess.TimeoutExpired:
             return -1, "", "timeout after 60s"

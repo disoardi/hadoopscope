@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import load_config
 from bootstrap import discover_capabilities, ensure_ansible, print_capabilities
 from checks.base import CheckResult
+import debug as _debug
 
 
 def build_arg_parser():
@@ -45,6 +46,8 @@ Examples:
                    help="Print capability map and exit")
     p.add_argument("--verbose", action="store_true",
                    help="Verbose output including capability map")
+    p.add_argument("--debug", action="store_true",
+                   help="Debug mode: print requests, commands and full output to stderr")
     p.add_argument("--version", action="version", version="HadoopScope 0.1.0")
     return p
 
@@ -130,12 +133,14 @@ def run_checks_for_env(env_name, env_config, global_config, caps, args):
                 continue
 
         if args.dry_run:
+            _debug.log(instance.__class__.__name__, "dry-run, skipping execution")
             result = CheckResult(
                 name=instance.__class__.__name__,
                 status="DRY_RUN",
                 message="Would run (capability OK)"
             )
         else:
+            _debug.log(instance.__class__.__name__, "running check")
             try:
                 result = instance.run()
             except Exception as e:
@@ -144,6 +149,8 @@ def run_checks_for_env(env_name, env_config, global_config, caps, args):
                     status=CheckResult.UNKNOWN,
                     message="Unhandled exception: {}".format(str(e))
                 )
+            _debug.log(instance.__class__.__name__,
+                       "result: {} — {}".format(result.status, result.message))
 
         results.append(result)
 
@@ -197,6 +204,11 @@ def main():
     parser = build_arg_parser()
     args = parser.parse_args()
 
+    # Attiva debug mode prima di qualsiasi altra operazione
+    if args.debug:
+        _debug.ENABLED = True
+        _debug.log("main", "debug mode enabled")
+
     # Bootstrap — discover capabilities first (always, fast)
     caps = discover_capabilities()
 
@@ -212,6 +224,7 @@ def main():
     # Carica config
     try:
         cfg = load_config(args.config)
+        _debug.log("main", "config loaded from {}".format(args.config))
     except Exception as e:
         print("ERROR loading config: {}".format(e), file=sys.stderr)
         sys.exit(1)
