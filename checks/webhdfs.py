@@ -33,6 +33,16 @@ def _open_url(req, timeout, no_proxy=False):
         return build_opener(ProxyHandler({})).open(req, timeout=timeout)
     return urlopen(req, timeout=timeout)
 
+
+def _make_request(url, method="GET", data=None):
+    # type: (str, str, bytes) -> Request
+    """Crea Request con metodo HTTP esplicito (Python 2/3 compatible).
+    urllib invia POST quando data!=None — serve override per PUT/DELETE.
+    """
+    req = Request(url, data=data)
+    req.get_method = lambda: method
+    return req
+
 from checks.base import CheckBase, CheckResult
 
 DEFAULT_TIMEOUT = 10
@@ -421,27 +431,33 @@ class HdfsWritabilityCheck(CheckBase):
                 _curl_delete_webhdfs(base_url, test_path_ts, no_proxy=no_proxy)
             else:
                 # Simple auth: urllib + gestione redirect 307
+                # WebHDFS CREATE richiede HTTP PUT (non POST) — serve get_method override
                 create_url = "{}/webhdfs/v1{}?op=CREATE&overwrite=true&user.name={}".format(
                     base_url.rstrip("/"), test_path_ts, user
                 )
                 try:
-                    _open_url(Request(create_url, data=b""), timeout=DEFAULT_TIMEOUT,
-                              no_proxy=no_proxy)
+                    # Step 1: PUT a NameNode (no body) → 307 redirect verso DataNode
+                    _open_url(_make_request(create_url, "PUT", data=b""),
+                              timeout=DEFAULT_TIMEOUT, no_proxy=no_proxy)
                 except HTTPError as e:
                     if e.code == 307:
                         location = e.headers.get("Location", "")
                         if location:
-                            _open_url(Request(location, data=self.TEST_FILE_CONTENT),
+                            # Step 2: PUT a DataNode con il contenuto del file
+                            _open_url(_make_request(location, "PUT",
+                                                    data=self.TEST_FILE_CONTENT),
                                       timeout=DEFAULT_TIMEOUT, no_proxy=no_proxy)
                         else:
                             raise
                     else:
                         raise
 
+                # WebHDFS DELETE richiede HTTP DELETE (non GET)
                 del_url = "{}/webhdfs/v1{}?op=DELETE&user.name={}".format(
                     base_url.rstrip("/"), test_path_ts, user
                 )
-                _open_url(Request(del_url), timeout=DEFAULT_TIMEOUT, no_proxy=no_proxy)
+                _open_url(_make_request(del_url, "DELETE"),
+                          timeout=DEFAULT_TIMEOUT, no_proxy=no_proxy)
 
             return CheckResult(
                 name="HdfsWritability",
