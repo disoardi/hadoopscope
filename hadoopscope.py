@@ -53,7 +53,7 @@ def build_check_registry(env_config, caps):
     # type: (dict, dict) -> dict
     """Costruisce il check_registry per l'environment dato."""
     from checks.ambari import (
-        AmbariServiceHealthCheck, NameNodeHACheck,
+        AmbariServiceHealthCheck, NameNodeHACheck, NameNodeBlocksCheck,
         ClusterAlertsCheck, ConfigStalenessCheck
     )
     from checks.webhdfs import HdfsSpaceCheck, HdfsDataNodeCheck, HdfsWritabilityCheck
@@ -69,6 +69,7 @@ def build_check_registry(env_config, caps):
         health_checks = [
             AmbariServiceHealthCheck,
             NameNodeHACheck,
+            NameNodeBlocksCheck,
             ClusterAlertsCheck,
             ConfigStalenessCheck,
         ]

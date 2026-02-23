@@ -22,7 +22,7 @@ except ImportError:
 from checks.base import CheckBase, CheckResult
 from checks.ambari import (
     AmbariServiceHealthCheck, ClusterAlertsCheck,
-    ConfigStalenessCheck, NameNodeHACheck,
+    ConfigStalenessCheck, NameNodeHACheck, NameNodeBlocksCheck,
 )
 from checks.webhdfs import HdfsDataNodeCheck, HdfsSpaceCheck
 from checks.yarn import YarnNodeHealthCheck, YarnQueueCheck
@@ -358,6 +358,224 @@ def test_namenode_ha_ambari26_ha_enabled_config_ok():
         server.shutdown()
 
 
+def test_namenode_ha_ambari26_metrics_ha_state_ok():
+    """Ambari 2.6.x: ha_state null in HostRoles ma HAState in metrics -> OK (fix per 2.6.x)."""
+    fixture = {
+        "host_components": [
+            {
+                "HostRoles": {"host_name": "nn1.test", "state": "STARTED", "ha_state": None},
+                "metrics": {"dfs": {"FSNamesystem": {"HAState": "active"}}},
+            },
+            {
+                "HostRoles": {"host_name": "nn2.test", "state": "STARTED", "ha_state": None},
+                "metrics": {"dfs": {"FSNamesystem": {"HAState": "standby"}}},
+            },
+        ]
+    }
+    route_map = {"/api/v1/clusters/": fixture}
+    server, port = start_mock_server(route_map)
+    config = {
+        "ambari_url": "http://127.0.0.1:{}".format(port),
+        "ambari_user": "admin", "ambari_pass": "admin",
+        "cluster_name": "test-cluster",
+    }
+    try:
+        result = NameNodeHACheck(config, {}).run()
+        assert result.status == CheckResult.OK, \
+            "metrics HAState should resolve HA state on Ambari 2.6.x: {}: {}".format(
+                result.status, result.message)
+        assert "Active" in result.message
+    finally:
+        server.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Helper per fixture NameNodeBlocks
+# ---------------------------------------------------------------------------
+
+def _nn_blocks_fixture(ha_state="active", safemode="", corrupt=0, missing=0,
+                       under_rep=0, name_dir_failed=None):
+    # type: (str, str, int, int, int, list) -> dict
+    failed_dirs = {}
+    if name_dir_failed:
+        for d in name_dir_failed:
+            failed_dirs[d] = "UNKNOWN"
+    nd_status = json.dumps({
+        "active": {"/grid/01/hadoop/hdfs/namenode": "IMAGE_AND_EDITS"},
+        "failed": failed_dirs,
+    })
+    return {
+        "host_components": [{
+            "HostRoles": {"host_name": "nn1.test", "state": "STARTED"},
+            "metrics": {"dfs": {
+                "FSNamesystem": {
+                    "HAState": ha_state,
+                    "CorruptBlocks": corrupt,
+                    "MissingBlocks": missing,
+                    "UnderReplicatedBlocks": under_rep,
+                },
+                "namenode": {
+                    "Safemode": safemode,
+                    "NameDirStatuses": nd_status,
+                },
+            }},
+        }]
+    }
+
+
+# ---------------------------------------------------------------------------
+# Test: NameNodeBlocksCheck
+# ---------------------------------------------------------------------------
+
+def test_namenode_blocks_ok():
+    """Tutti i blocchi OK, no safemode -> OK."""
+    route_map = {"/api/v1/clusters/": _nn_blocks_fixture()}
+    server, port = start_mock_server(route_map)
+    config = {
+        "ambari_url": "http://127.0.0.1:{}".format(port),
+        "ambari_user": "admin", "ambari_pass": "admin",
+        "cluster_name": "test-cluster",
+    }
+    try:
+        result = NameNodeBlocksCheck(config, {}).run()
+        assert result.status == CheckResult.OK, "{}: {}".format(result.status, result.message)
+        assert "nn1" in result.message
+    finally:
+        server.shutdown()
+
+
+def test_namenode_blocks_safemode_critical():
+    """SafeMode attivo -> CRITICAL."""
+    route_map = {"/api/v1/clusters/": _nn_blocks_fixture(
+        safemode="Safe mode ON. The reported blocks 23900000 need additional 10 replication."
+    )}
+    server, port = start_mock_server(route_map)
+    config = {
+        "ambari_url": "http://127.0.0.1:{}".format(port),
+        "ambari_user": "admin", "ambari_pass": "admin",
+        "cluster_name": "test-cluster",
+    }
+    try:
+        result = NameNodeBlocksCheck(config, {}).run()
+        assert result.status == CheckResult.CRITICAL, "{}: {}".format(result.status, result.message)
+        assert "SafeMode" in result.message
+    finally:
+        server.shutdown()
+
+
+def test_namenode_blocks_corrupt_critical():
+    """CorruptBlocks > 0 -> CRITICAL."""
+    route_map = {"/api/v1/clusters/": _nn_blocks_fixture(corrupt=3)}
+    server, port = start_mock_server(route_map)
+    config = {
+        "ambari_url": "http://127.0.0.1:{}".format(port),
+        "ambari_user": "admin", "ambari_pass": "admin",
+        "cluster_name": "test-cluster",
+    }
+    try:
+        result = NameNodeBlocksCheck(config, {}).run()
+        assert result.status == CheckResult.CRITICAL, "{}: {}".format(result.status, result.message)
+        assert "corrupt" in result.message.lower()
+        assert result.details.get("corrupt_blocks") == 3
+    finally:
+        server.shutdown()
+
+
+def test_namenode_blocks_missing_critical():
+    """MissingBlocks > 0 -> CRITICAL (data loss)."""
+    route_map = {"/api/v1/clusters/": _nn_blocks_fixture(missing=2)}
+    server, port = start_mock_server(route_map)
+    config = {
+        "ambari_url": "http://127.0.0.1:{}".format(port),
+        "ambari_user": "admin", "ambari_pass": "admin",
+        "cluster_name": "test-cluster",
+    }
+    try:
+        result = NameNodeBlocksCheck(config, {}).run()
+        assert result.status == CheckResult.CRITICAL, "{}: {}".format(result.status, result.message)
+        assert "MISSING" in result.message
+        assert result.details.get("missing_blocks") == 2
+    finally:
+        server.shutdown()
+
+
+def test_namenode_blocks_namedir_failed_critical():
+    """NameDir fallita -> CRITICAL."""
+    route_map = {"/api/v1/clusters/": _nn_blocks_fixture(
+        name_dir_failed=["/grid/02/hadoop/hdfs/namenode"]
+    )}
+    server, port = start_mock_server(route_map)
+    config = {
+        "ambari_url": "http://127.0.0.1:{}".format(port),
+        "ambari_user": "admin", "ambari_pass": "admin",
+        "cluster_name": "test-cluster",
+    }
+    try:
+        result = NameNodeBlocksCheck(config, {}).run()
+        assert result.status == CheckResult.CRITICAL, "{}: {}".format(result.status, result.message)
+        assert "NameDir" in result.message
+        assert len(result.details.get("name_dir_failed", [])) == 1
+    finally:
+        server.shutdown()
+
+
+def test_namenode_blocks_under_replicated_warning():
+    """UnderReplicatedBlocks > soglia -> WARNING."""
+    route_map = {"/api/v1/clusters/": _nn_blocks_fixture(under_rep=500)}
+    server, port = start_mock_server(route_map)
+    config = {
+        "ambari_url": "http://127.0.0.1:{}".format(port),
+        "ambari_user": "admin", "ambari_pass": "admin",
+        "cluster_name": "test-cluster",
+        "checks": {"namenode_blocks": {"under_replicated_warning": 100}},
+    }
+    try:
+        result = NameNodeBlocksCheck(config, {}).run()
+        assert result.status == CheckResult.WARNING, "{}: {}".format(result.status, result.message)
+        assert "under-replicated" in result.message.lower()
+    finally:
+        server.shutdown()
+
+
+def test_namenode_blocks_under_replicated_ok_below_threshold():
+    """UnderReplicatedBlocks <= soglia -> OK."""
+    route_map = {"/api/v1/clusters/": _nn_blocks_fixture(under_rep=50)}
+    server, port = start_mock_server(route_map)
+    config = {
+        "ambari_url": "http://127.0.0.1:{}".format(port),
+        "ambari_user": "admin", "ambari_pass": "admin",
+        "cluster_name": "test-cluster",
+        "checks": {"namenode_blocks": {"under_replicated_warning": 100}},
+    }
+    try:
+        result = NameNodeBlocksCheck(config, {}).run()
+        assert result.status == CheckResult.OK, "{}: {}".format(result.status, result.message)
+    finally:
+        server.shutdown()
+
+
+def test_namenode_blocks_metrics_unavailable():
+    """Metrics assenti (AMS non risponde) -> UNKNOWN."""
+    fixture = {
+        "host_components": [{
+            "HostRoles": {"host_name": "nn1.test", "state": "STARTED"},
+            # metrics assente
+        }]
+    }
+    route_map = {"/api/v1/clusters/": fixture}
+    server, port = start_mock_server(route_map)
+    config = {
+        "ambari_url": "http://127.0.0.1:{}".format(port),
+        "ambari_user": "admin", "ambari_pass": "admin",
+        "cluster_name": "test-cluster",
+    }
+    try:
+        result = NameNodeBlocksCheck(config, {}).run()
+        assert result.status == CheckResult.UNKNOWN, "{}: {}".format(result.status, result.message)
+    finally:
+        server.shutdown()
+
+
 # ---------------------------------------------------------------------------
 # Test: HdfsDataNodeCheck
 # ---------------------------------------------------------------------------
@@ -550,6 +768,15 @@ if __name__ == "__main__":
         test_namenode_ha_non_ha_cluster,
         test_namenode_ha_ambari26_two_nn_warning,
         test_namenode_ha_ambari26_ha_enabled_config_ok,
+        test_namenode_ha_ambari26_metrics_ha_state_ok,
+        test_namenode_blocks_ok,
+        test_namenode_blocks_safemode_critical,
+        test_namenode_blocks_corrupt_critical,
+        test_namenode_blocks_missing_critical,
+        test_namenode_blocks_namedir_failed_critical,
+        test_namenode_blocks_under_replicated_warning,
+        test_namenode_blocks_under_replicated_ok_below_threshold,
+        test_namenode_blocks_metrics_unavailable,
         test_hdfs_datanode_ok,
         test_hdfs_datanode_critical,
         test_hdfs_datanode_no_url,

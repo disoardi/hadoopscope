@@ -324,8 +324,9 @@ class ConfigStalenessCheck(CheckBase):
 class NameNodeHACheck(CheckBase):
     """Verifica stato HA NameNode (active/standby).
 
-    Usa HostRoles/ha_state — campo diretto sull'host component, non dipende da
-    AMS/metrics collector. Compatibile con Ambari 2.x+.
+    Sorgente primaria: metrics/dfs/FSNamesystem/HAState (letto da JMX del NN,
+    funziona su Ambari 2.6.x dove HostRoles/ha_state e' null).
+    Fallback: HostRoles/ha_state (Ambari 2.7+).
 
     Se il cluster non ha HA abilitata (single NN), ritorna OK con nota.
     """
@@ -340,7 +341,8 @@ class NameNodeHACheck(CheckBase):
                 "services/HDFS/components/NAMENODE"
                 "?fields=host_components/HostRoles/host_name,"
                 "host_components/HostRoles/ha_state,"
-                "host_components/HostRoles/state"
+                "host_components/HostRoles/state,"
+                "host_components/metrics/dfs/FSNamesystem/HAState"
             )
         except IOError as e:
             return CheckResult(
@@ -359,20 +361,30 @@ class NameNodeHACheck(CheckBase):
 
         active        = []
         standby       = []
-        running_no_ha = []  # NN started ma ha_state assente (cluster non-HA)
+        running_no_ha = []  # NN started ma ha_state assente da entrambe le sorgenti
 
         for hc in host_components:
             roles    = hc.get("HostRoles", {})
             host     = roles.get("host_name", "?")
-            ha_state = (roles.get("ha_state") or "").lower()
             nn_state = roles.get("state", "")
+
+            # Sorgente primaria: metrics JMX (funziona su Ambari 2.6.x)
+            metrics_ha = (
+                hc.get("metrics", {})
+                  .get("dfs", {})
+                  .get("FSNamesystem", {})
+                  .get("HAState") or ""
+            ).lower()
+            # Fallback: HostRoles.ha_state
+            roles_ha = (roles.get("ha_state") or "").lower()
+            ha_state = metrics_ha or roles_ha
 
             if ha_state == "active":
                 active.append(host)
             elif ha_state == "standby":
                 standby.append(host)
             elif nn_state == "STARTED":
-                # NN in esecuzione ma HA non abilitata (o ha_state non ancora sync)
+                # NN in esecuzione ma ha_state assente da entrambe le sorgenti
                 running_no_ha.append(host)
 
         # ha_state non disponibile (Ambari 2.6.x o HA non ancora sync)
@@ -443,4 +455,158 @@ class NameNodeHACheck(CheckBase):
             name   = "NameNodeHA",
             status = CheckResult.UNKNOWN,
             message = "NameNode HA state unavailable — check if HDFS service is STARTED"
+        )
+
+
+class NameNodeBlocksCheck(CheckBase):
+    """Verifica lo stato funzionale del NameNode attivo: SafeMode, blocchi corrotti/mancanti,
+    NameDir fallite e blocchi sotto-replicati.
+
+    Legge le metriche JMX tramite Ambari API — compatibile con Ambari 2.6.x.
+
+    CRITICAL: SafeMode attivo (HDFS read-only) | CorruptBlocks > 0 | MissingBlocks > 0
+              | NameDir fallita (rischio crash NN)
+    WARNING:  UnderReplicatedBlocks > soglia (default: 0)
+    """
+
+    requires = []
+
+    def run(self):
+        # type: () -> CheckResult
+        try:
+            client = _make_ambari_client(self.config)
+            data   = client.get(
+                "services/HDFS/components/NAMENODE"
+                "?fields=host_components/HostRoles/host_name,"
+                "host_components/HostRoles/state,"
+                "host_components/metrics/dfs/FSNamesystem/HAState,"
+                "host_components/metrics/dfs/FSNamesystem/CorruptBlocks,"
+                "host_components/metrics/dfs/FSNamesystem/MissingBlocks,"
+                "host_components/metrics/dfs/FSNamesystem/UnderReplicatedBlocks,"
+                "host_components/metrics/dfs/namenode/Safemode,"
+                "host_components/metrics/dfs/namenode/NameDirStatuses"
+            )
+        except IOError as e:
+            return CheckResult(
+                name="NameNodeBlocks",
+                status=CheckResult.UNKNOWN,
+                message=str(e)
+            )
+
+        host_components = data.get("host_components", [])
+        if not host_components:
+            return CheckResult(
+                name="NameNodeBlocks",
+                status=CheckResult.UNKNOWN,
+                message="No NameNode components found in Ambari"
+            )
+
+        # Trova il NN attivo tramite HAState dalle metriche JMX
+        active_hc = None
+        for hc in host_components:
+            if hc.get("HostRoles", {}).get("state") != "STARTED":
+                continue
+            ha_state = (
+                hc.get("metrics", {})
+                  .get("dfs", {})
+                  .get("FSNamesystem", {})
+                  .get("HAState") or ""
+            ).lower()
+            if ha_state == "active":
+                active_hc = hc
+                break
+
+        # Fallback: non-HA o HAState non disponibile → primo NN STARTED
+        if active_hc is None:
+            for hc in host_components:
+                if hc.get("HostRoles", {}).get("state") == "STARTED":
+                    active_hc = hc
+                    break
+
+        if active_hc is None:
+            return CheckResult(
+                name="NameNodeBlocks",
+                status=CheckResult.UNKNOWN,
+                message="No STARTED NameNode found"
+            )
+
+        host       = active_hc.get("HostRoles", {}).get("host_name", "?")
+        short_host = host.split(".")[0]
+        dfs        = active_hc.get("metrics", {}).get("dfs", {})
+        fsns       = dfs.get("FSNamesystem", {})
+        nn_m       = dfs.get("namenode", {})
+
+        if not fsns and not nn_m:
+            return CheckResult(
+                name="NameNodeBlocks",
+                status=CheckResult.UNKNOWN,
+                message="Metrics not available from NameNode {}".format(short_host)
+            )
+
+        # 1. SafeMode — HDFS diventa read-only, nessun job di scrittura funziona
+        safemode = nn_m.get("Safemode", "")
+        if safemode:
+            return CheckResult(
+                name="NameNodeBlocks",
+                status=CheckResult.CRITICAL,
+                message="SafeMode ON ({}): {}".format(short_host, safemode),
+                details={"host": host, "safemode": safemode}
+            )
+
+        # 2. Blocchi corrotti e mancanti — perdita dati
+        corrupt  = int(fsns.get("CorruptBlocks", 0))
+        missing  = int(fsns.get("MissingBlocks", 0))
+        under_rep = int(fsns.get("UnderReplicatedBlocks", 0))
+
+        # 3. NameDir fallite — il NN puo' crashare se perde tutte le dir
+        name_dir_failed = []
+        name_dir_raw = nn_m.get("NameDirStatuses", "{}")
+        try:
+            nd_info = json.loads(name_dir_raw) if isinstance(name_dir_raw, str) else (name_dir_raw or {})
+            failed  = nd_info.get("failed", {})
+            if isinstance(failed, dict) and failed:
+                name_dir_failed = list(failed.keys())
+        except (ValueError, TypeError):
+            pass
+
+        criticals = []
+        if missing > 0:
+            criticals.append("{} MISSING block(s) — data loss".format(missing))
+        if corrupt > 0:
+            criticals.append("{} corrupt block(s)".format(corrupt))
+        if name_dir_failed:
+            short_dirs = [d.split("/")[-1] for d in name_dir_failed[:3]]
+            criticals.append("NameDir failed: {}".format(", ".join(short_dirs)))
+
+        nn_cfg = self.config.get("checks", {}).get("namenode_blocks", {})
+        warn_threshold = int(nn_cfg.get("under_replicated_warning", 0))
+
+        details = {
+            "host": host,
+            "corrupt_blocks": corrupt,
+            "missing_blocks": missing,
+            "under_replicated_blocks": under_rep,
+            "name_dir_failed": name_dir_failed,
+        }
+
+        if criticals:
+            return CheckResult(
+                name="NameNodeBlocks",
+                status=CheckResult.CRITICAL,
+                message="({}) {}".format(short_host, "; ".join(criticals)),
+                details=details
+            )
+        if under_rep > warn_threshold:
+            return CheckResult(
+                name="NameNodeBlocks",
+                status=CheckResult.WARNING,
+                message="({}) {} under-replicated block(s)".format(short_host, under_rep),
+                details=details
+            )
+
+        return CheckResult(
+            name="NameNodeBlocks",
+            status=CheckResult.OK,
+            message="NameNode OK (active: {}), no block anomalies".format(short_host),
+            details=details
         )
