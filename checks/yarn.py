@@ -94,15 +94,19 @@ class YarnNodeHealthCheck(CheckBase):
                 message="No nodes returned by YARN RM (or cluster empty)"
             )
 
-        unhealthy = [n["id"] for n in nodes if n.get("state") == "UNHEALTHY"]
-        lost      = [n["id"] for n in nodes if n.get("state") == "LOST"]
-        running   = [n["id"] for n in nodes if n.get("state") == "RUNNING"]
+        unhealthy     = [n["id"] for n in nodes if n.get("state") == "UNHEALTHY"]
+        lost          = [n["id"] for n in nodes if n.get("state") == "LOST"]
+        running       = [n["id"] for n in nodes if n.get("state") == "RUNNING"]
+        decommissioned = [n["id"] for n in nodes
+                          if n.get("state") in ("DECOMMISSIONED", "DECOMMISSIONING",
+                                                "SHUTDOWN", "REBOOTED")]
 
         details = {
             "total": len(nodes),
             "running": len(running),
             "unhealthy": len(unhealthy),
             "lost": len(lost),
+            "decommissioned": len(decommissioned),
         }
 
         if lost:
@@ -120,10 +124,14 @@ class YarnNodeHealthCheck(CheckBase):
                     len(unhealthy), ", ".join(unhealthy[:5])),
                 details=details
             )
+
+        msg = "{}/{} nodes RUNNING".format(len(running), len(nodes))
+        if decommissioned:
+            msg += " ({} decommissioned)".format(len(decommissioned))
         return CheckResult(
             name="YarnNodeHealth",
             status=CheckResult.OK,
-            message="{} nodes RUNNING".format(len(running)),
+            message=msg,
             details=details
         )
 
