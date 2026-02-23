@@ -64,6 +64,7 @@ services:
       - critical
 
   # Test runner — lancia tutti i test pytest/unittest
+  # entrypoint: [] sovrascrive ENTRYPOINT del Dockerfile (python3 hadoopscope.py)
   test-runner:
     build:
       context: .
@@ -73,8 +74,9 @@ services:
     volumes:
       - .:/app:ro
     working_dir: /app
+    entrypoint: ["python3"]
     environment:
       - HADOOPSCOPE_TEST_API_URL=http://mock-api:8080
       # Test per secrets via env var
       - HS_DOCKER_TEST_SECRET=docker_secret_value
-    command: ["python3", "tests/run_all.py"]
+    command: ["tests/run_all.py"]
