@@ -202,12 +202,28 @@ class ClusterAlertsCheck(CheckBase):
                 message="No active CRITICAL alerts"
             )
 
-        summaries = []
-        for item in items[:10]:
+        # Raggruppa per label: {label: [short_host, ...]}
+        groups = {}  # type: dict
+        for item in items:
             alert = item.get("Alert", {})
             label = alert.get("label", alert.get("definition_name", "?"))
             host  = alert.get("host_name", "")
-            summaries.append("{} ({})".format(label, host) if host else label)
+            # Abbrevia FQDN: prendi solo il primo componente (hdslsep040.corp.com → hdslsep040)
+            short = host.split(".")[0] if host else ""
+            if label not in groups:
+                groups[label] = []
+            if short:
+                groups[label].append(short)
+
+        summaries = []
+        for label, hosts in sorted(groups.items()):
+            if not hosts:
+                summaries.append(label)
+            elif len(hosts) == 1:
+                summaries.append("{} ({})".format(label, hosts[0]))
+            else:
+                summaries.append("{} x{} ({})".format(
+                    label, len(hosts), ", ".join(hosts[:6])))
 
         return CheckResult(
             name="ClusterAlerts",
