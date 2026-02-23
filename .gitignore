@@ -1,10 +1,16 @@
 # Config con credenziali reali
-config/hadoopscope.yaml
-config/*.prod.yaml
-config/*.local.yaml
-*.keytab
+# Ignora TUTTI i file .yaml in config/ — includi esplicitamente solo quelli safe
+config/*.yaml
+!config/example.yaml
+!config/test.yaml
+!config/docker-test.yaml
+# File .env ovunque nell'albero
 .env
+config/.env
 secrets.env
+# Keytab Kerberos ovunque nell'albero
+*.keytab
+**/*.keytab
 
 # Python
 __pycache__/
