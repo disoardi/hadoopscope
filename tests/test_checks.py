@@ -912,6 +912,30 @@ def test_yaml_parser_hostport_as_string():
     ], result["zookeeper_hosts"]
 
 
+def test_extract_task_error_parses_ansible_json():
+    import json
+    from checks.hive import _extract_task_error
+    task_result = {
+        "changed": False,
+        "cmd": 'beeline -u "jdbc:hive2://zk1:2181/"',
+        "msg": "non-zero return code",
+        "rc": 127,
+        "stderr": "/bin/sh: beeline: command not found",
+        "stdout": "",
+    }
+    ansible_out = (
+        "PLAY [HiveCheck] ****\n\n"
+        "TASK [Beeline test] ****\n"
+        "fatal: [localhost]: FAILED! => {}\n\n"
+        "PLAY RECAP ****\n"
+        "localhost : ok=0 changed=0 failed=1\n"
+    ).format(json.dumps(task_result))
+    result = _extract_task_error(ansible_out)
+    assert "non-zero return code" in result
+    assert "beeline: command not found" in result
+    assert "PLAY RECAP" not in result
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -971,6 +995,7 @@ if __name__ == "__main__":
         test_beeline_url_zk_dict_items,
         test_beeline_cmd_custom_path,
         test_yaml_parser_hostport_as_string,
+        test_extract_task_error_parses_ansible_json,
     ]
     failed = 0
     for t in tests:

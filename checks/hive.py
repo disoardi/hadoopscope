@@ -104,7 +104,11 @@ def _extract_task_error(ansible_stdout):
     We parse that JSON to get beeline's real stdout/stderr/msg
     instead of returning the truncated Ansible header.
     """
-    match = re.search(r"FAILED! => (\{.*)", ansible_stdout, re.DOTALL)
+    # Ansible stampa il task result come JSON su una sola riga.
+    # re.DOTALL NON va usato: cattura anche il PLAY RECAP che segue,
+    # rendendo il JSON non parsabile. Il \} assicura di fermarsi
+    # alla chiusura dell'oggetto sulla stessa riga.
+    match = re.search(r"FAILED! => (\{.*\})", ansible_stdout)
     if not match:
         return ansible_stdout[-800:]
     try:
