@@ -74,15 +74,33 @@ def _make_ambari_client(config):
 
 
 class AmbariServiceHealthCheck(CheckBase):
-    """Controlla lo stato di tutti i servizi HDP via Ambari API."""
+    """Controlla lo stato di tutti i servizi HDP via Ambari API.
+
+    Logica INSTALLED:
+    - Se l'utente configura un filtro 'services' esplicito, INSTALLED e' WARNING
+      (quei servizi sono attesi running).
+    - Senza filtro, INSTALLED e' ignorato — falso positivo per le librerie client
+      HDP (PIG, TEZ, SQOOP, SLIDER, ...) che sono sempre INSTALLED per design.
+      Usare 'warn_installed: true' nel config per abilitarlo.
+
+    Maintenance mode: servizi con maintenance_state ON o IMPLIED_FROM_HOST sono
+    sempre esclusi dal controllo.
+    """
 
     requires = []  # sempre disponibile — pura API REST
+
+    # Librerie/framework HDP normalmente in stato INSTALLED (non hanno demoni attivi)
+    _CLIENT_SERVICES = frozenset(["PIG", "SQOOP", "SLIDER", "TEZ", "MAHOUT"])
 
     def run(self):
         # type: () -> CheckResult
         try:
             client = _make_ambari_client(self.config)
-            data   = client.get("services?fields=ServiceInfo/state,ServiceInfo/service_name")
+            data   = client.get(
+                "services?fields=ServiceInfo/state,"
+                "ServiceInfo/service_name,"
+                "ServiceInfo/maintenance_state"
+            )
         except IOError as e:
             return CheckResult(
                 name    = "AmbariServiceHealth",
@@ -90,26 +108,35 @@ class AmbariServiceHealthCheck(CheckBase):
                 message = str(e)
             )
 
-        services   = data.get("items", [])
-        stopped    = []
+        services = data.get("items", [])
+        stopped  = []
         not_started = []
 
-        target_services = self.config.get("checks", {}).get(
-            "service_health", {}
-        ).get("services", [])
+        svc_cfg         = self.config.get("checks", {}).get("service_health", {})
+        target_services = svc_cfg.get("services", [])
+
+        # Warna su INSTALLED solo se filtro esplicito o warn_installed: true
+        warn_installed = bool(target_services) or svc_cfg.get("warn_installed", False)
 
         for svc in services:
-            info  = svc.get("ServiceInfo", {})
-            name  = info.get("service_name", "?")
-            state = info.get("state", "UNKNOWN")
+            info        = svc.get("ServiceInfo", {})
+            name        = info.get("service_name", "?")
+            state       = info.get("state", "UNKNOWN")
+            maintenance = info.get("maintenance_state", "OFF")
 
             if target_services and name not in target_services:
                 continue
 
+            # Salta servizi in maintenance mode
+            if maintenance in ("ON", "IMPLIED_FROM_HOST"):
+                continue
+
             if state not in ("STARTED", "INSTALLED"):
                 not_started.append("{} ({})".format(name, state))
-            elif state == "INSTALLED":
-                stopped.append(name)
+            elif state == "INSTALLED" and warn_installed:
+                # Le librerie client sono sempre INSTALLED, non segnalare
+                if name not in self._CLIENT_SERVICES:
+                    stopped.append(name)
 
         if not_started:
             return CheckResult(
@@ -126,11 +153,14 @@ class AmbariServiceHealthCheck(CheckBase):
                 details = {"stopped": stopped}
             )
 
+        active_count = len([s for s in services
+                            if s.get("ServiceInfo", {}).get("maintenance_state", "OFF")
+                            not in ("ON", "IMPLIED_FROM_HOST")])
         return CheckResult(
             name    = "AmbariServiceHealth",
             status  = CheckResult.OK,
-            message = "All {} monitored services are STARTED".format(len(services)),
-            details = {"service_count": len(services)}
+            message = "All {} monitored services are STARTED".format(active_count),
+            details = {"service_count": active_count}
         )
 
 
@@ -178,7 +208,12 @@ class ClusterAlertsCheck(CheckBase):
 
 
 class ConfigStalenessCheck(CheckBase):
-    """Verifica che non ci siano configurazioni stale non propagate ai nodi."""
+    """Verifica che non ci siano configurazioni stale non propagate ai nodi.
+
+    Compatibilita':
+    - Ambari 2.7+: usa ServiceInfo/config_staleness_check_issues
+    - Ambari 2.6.x: fallback automatico su ServiceInfo/config_state == STALE_CONFIGS
+    """
 
     requires = []
 
@@ -186,25 +221,54 @@ class ConfigStalenessCheck(CheckBase):
         # type: () -> CheckResult
         try:
             client = _make_ambari_client(self.config)
-            data   = client.get(
+        except (KeyError, TypeError) as e:
+            return CheckResult(
+                name="ConfigStaleness",
+                status=CheckResult.UNKNOWN,
+                message="Config error: {}".format(e)
+            )
+
+        # Prova campo Ambari 2.7+ (config_staleness_check_issues)
+        staleness_field = "config_staleness_check_issues"
+        try:
+            data = client.get(
                 "services?fields=ServiceInfo/config_staleness_check_issues,"
                 "ServiceInfo/service_name"
             )
         except IOError as e:
-            return CheckResult(
-                name="ConfigStaleness",
-                status=CheckResult.UNKNOWN,
-                message=str(e)
-            )
+            if "HTTP 400" in str(e):
+                # Ambari < 2.7: campo non supportato, usa config_state
+                staleness_field = "config_state"
+                try:
+                    data = client.get(
+                        "services?fields=ServiceInfo/config_state,"
+                        "ServiceInfo/service_name"
+                    )
+                except IOError as e2:
+                    return CheckResult(
+                        name="ConfigStaleness",
+                        status=CheckResult.UNKNOWN,
+                        message=str(e2)
+                    )
+            else:
+                return CheckResult(
+                    name="ConfigStaleness",
+                    status=CheckResult.UNKNOWN,
+                    message=str(e)
+                )
 
         items = data.get("items", [])
         stale = []
         for item in items:
-            info   = item.get("ServiceInfo", {})
-            name   = info.get("service_name", "?")
-            issues = info.get("config_staleness_check_issues", [])
-            if issues:
-                stale.append(name)
+            info = item.get("ServiceInfo", {})
+            name = info.get("service_name", "?")
+            if staleness_field == "config_state":
+                if info.get("config_state") == "STALE_CONFIGS":
+                    stale.append(name)
+            else:
+                issues = info.get("config_staleness_check_issues", [])
+                if issues:
+                    stale.append(name)
 
         if stale:
             return CheckResult(
@@ -221,7 +285,13 @@ class ConfigStalenessCheck(CheckBase):
 
 
 class NameNodeHACheck(CheckBase):
-    """Verifica stato HA NameNode (active/standby)."""
+    """Verifica stato HA NameNode (active/standby).
+
+    Usa HostRoles/ha_state — campo diretto sull'host component, non dipende da
+    AMS/metrics collector. Compatibile con Ambari 2.x+.
+
+    Se il cluster non ha HA abilitata (single NN), ritorna OK con nota.
+    """
 
     requires = []  # API REST, sempre disponibile
 
@@ -231,7 +301,9 @@ class NameNodeHACheck(CheckBase):
             client = _make_ambari_client(self.config)
             data   = client.get(
                 "services/HDFS/components/NAMENODE"
-                "?fields=metrics/dfs/FSNamesystem/HAState,host_components/HostRoles/host_name"
+                "?fields=host_components/HostRoles/host_name,"
+                "host_components/HostRoles/ha_state,"
+                "host_components/HostRoles/state"
             )
         except IOError as e:
             return CheckResult(
@@ -241,13 +313,41 @@ class NameNodeHACheck(CheckBase):
             )
 
         host_components = data.get("host_components", [])
-        active  = [hc["HostRoles"]["host_name"] for hc in host_components
-                   if hc.get("metrics", {}).get("dfs", {}).get(
-                       "FSNamesystem", {}).get("HAState") == "active"]
-        standby = [hc["HostRoles"]["host_name"] for hc in host_components
-                   if hc.get("metrics", {}).get("dfs", {}).get(
-                       "FSNamesystem", {}).get("HAState") == "standby"]
+        if not host_components:
+            return CheckResult(
+                name="NameNodeHA",
+                status=CheckResult.UNKNOWN,
+                message="No NameNode components found in Ambari"
+            )
 
+        active        = []
+        standby       = []
+        running_no_ha = []  # NN started ma ha_state assente (cluster non-HA)
+
+        for hc in host_components:
+            roles    = hc.get("HostRoles", {})
+            host     = roles.get("host_name", "?")
+            ha_state = (roles.get("ha_state") or "").lower()
+            nn_state = roles.get("state", "")
+
+            if ha_state == "active":
+                active.append(host)
+            elif ha_state == "standby":
+                standby.append(host)
+            elif nn_state == "STARTED":
+                # NN in esecuzione ma HA non abilitata (o ha_state non ancora sync)
+                running_no_ha.append(host)
+
+        # Cluster non-HA: NN running, nessun ha_state
+        if not active and not standby and running_no_ha:
+            return CheckResult(
+                name   = "NameNodeHA",
+                status = CheckResult.OK,
+                message = "NameNode running (non-HA): {}".format(", ".join(running_no_ha)),
+                details = {"hosts": running_no_ha, "ha_enabled": False}
+            )
+
+        # HA OK: esattamente 1 active, >=1 standby
         if len(active) == 1 and len(standby) >= 1:
             return CheckResult(
                 name    = "NameNodeHA",
@@ -255,17 +355,29 @@ class NameNodeHACheck(CheckBase):
                 message = "Active: {} | Standby: {}".format(active[0], ", ".join(standby)),
                 details = {"active": active, "standby": standby}
             )
-        elif len(active) == 0:
+
+        # Split-brain: piu' di 1 active
+        if len(active) > 1:
             return CheckResult(
                 name   = "NameNodeHA",
                 status = CheckResult.CRITICAL,
-                message = "No active NameNode found! HA broken.",
+                message = "HA split-brain: {} active NameNodes: {}".format(
+                    len(active), ", ".join(active)),
                 details = {"active": active, "standby": standby}
             )
-        else:
+
+        # HA abilitata ma nessun active trovato
+        if standby:
             return CheckResult(
                 name   = "NameNodeHA",
-                status = CheckResult.WARNING,
-                message = "HA state unclear: active={}, standby={}".format(active, standby),
+                status = CheckResult.CRITICAL,
+                message = "No active NameNode! Standby only: {}".format(", ".join(standby)),
                 details = {"active": active, "standby": standby}
             )
+
+        # ha_state assente su tutti e nessun NN in STARTED
+        return CheckResult(
+            name   = "NameNodeHA",
+            status = CheckResult.UNKNOWN,
+            message = "NameNode HA state unavailable — check if HDFS service is STARTED"
+        )

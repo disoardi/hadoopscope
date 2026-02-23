@@ -59,12 +59,12 @@ def build_check_registry(env_config, caps):
     from checks.webhdfs import HdfsSpaceCheck, HdfsDataNodeCheck, HdfsWritabilityCheck
     from checks.yarn import YarnNodeHealthCheck, YarnQueueCheck
     from checks.hive import HiveCheck
-    from checks.cloudera import ClouderaServiceHealthCheck
+    from checks.cloudera import ClouderaServiceHealthCheck, ClouderaParcelCheck
 
     env_type = env_config.get("type", "hdp")
 
     if env_type == "cdp":
-        health_checks = [ClouderaServiceHealthCheck]
+        health_checks = [ClouderaServiceHealthCheck, ClouderaParcelCheck]
     else:
         health_checks = [
             AmbariServiceHealthCheck,

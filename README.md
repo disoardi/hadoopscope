@@ -152,6 +152,98 @@ environments:
 
 Full config reference: [config/example.yaml](config/example.yaml)
 
+## Monitor User (Minimum Privilege)
+
+HadoopScope requires a **read-only** service account. Below are the minimum permissions needed per component.
+
+### Ambari (HDP)
+
+Create a dedicated user in Ambari with the **Cluster User** (read-only) role. No admin access is needed.
+
+```bash
+# Via Ambari REST API (run once as admin)
+curl -u admin:$ADMIN_PASS -X POST \
+  http://ambari:8080/api/v1/users \
+  -H "Content-Type: application/json" \
+  -d '{"Users":{"user_name":"monitor","password":"CHANGEME","active":true,"admin":false}}'
+
+# Assign read-only role to the cluster
+curl -u admin:$ADMIN_PASS -X POST \
+  "http://ambari:8080/api/v1/clusters/CLUSTER_NAME/privileges" \
+  -H "Content-Type: application/json" \
+  -d '[{"PrivilegeInfo":{"permission_name":"CLUSTER.USER","principal_name":"monitor","principal_type":"USER"}}]'
+```
+
+### Cloudera Manager (CDP)
+
+Create a user with the **Read-Only** role in CM:
+
+- CM UI → Administration → Users & Roles → Add User
+- Role: `Read-Only`
+- No cluster admin or configuration permissions needed.
+
+### WebHDFS / HDFS
+
+The monitor user needs read access to checked paths. For the writability probe, write access to a dedicated scratch directory:
+
+```bash
+# HDFS ACL — read on monitored paths
+hdfs dfs -setfacl -m user:monitor:r-x /user/hive/warehouse
+hdfs dfs -setfacl -m user:monitor:r-x /tmp
+
+# Writability probe directory (HdfsWritabilityCheck)
+hdfs dfs -mkdir -p /tmp/.hadoopscope-probe
+hdfs dfs -chown monitor /tmp/.hadoopscope-probe
+hdfs dfs -chmod 700 /tmp/.hadoopscope-probe
+```
+
+If using the `user.name` query param (no Kerberos), the WebHDFS endpoint must allow the configured `webhdfs.user` via `hadoop.proxyuser` rules, or the user must exist on the NameNode.
+
+### YARN ResourceManager
+
+YARN RM REST API (`/ws/v1/cluster/*`) does not require authentication by default. No additional permissions needed.
+
+If `yarn.acl.enable=true` is set:
+
+```xml
+<!-- yarn-site.xml -->
+<property>
+  <name>yarn.admin.acl</name>
+  <value>monitor</value>   <!-- or a dedicated group -->
+</property>
+```
+
+### Kerberos (SPNEGO environments)
+
+```bash
+# Create service principal
+kadmin -q "addprinc -randkey monitor/monitor-host.corp.com@REALM"
+
+# Export keytab
+kadmin -q "ktadd -k /etc/security/keytabs/monitor.keytab monitor/monitor-host.corp.com@REALM"
+
+# Restrict keytab permissions
+chown hadoopscope:hadoopscope /etc/security/keytabs/monitor.keytab
+chmod 400 /etc/security/keytabs/monitor.keytab
+
+# Add HDFS ACL for the Kerberos principal
+hdfs dfs -setfacl -m user:monitor:r-x /user/hive/warehouse
+```
+
+Set in config:
+```yaml
+kerberos:
+  enabled: true
+  keytab: /etc/security/keytabs/monitor.keytab
+  principal: monitor/monitor-host.corp.com@REALM
+```
+
+### Ranger (if enabled)
+
+Add the `monitor` user to a read-only policy covering the HDFS paths and WebHDFS service. No Hive, YARN, or admin policies needed unless those checks are enabled.
+
+---
+
 ## Sample Output
 
 ### Text format

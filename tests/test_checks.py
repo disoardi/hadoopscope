@@ -20,7 +20,10 @@ except ImportError:
     import urlparse as _urlparse
 
 from checks.base import CheckBase, CheckResult
-from checks.ambari import AmbariServiceHealthCheck, ClusterAlertsCheck, ConfigStalenessCheck
+from checks.ambari import (
+    AmbariServiceHealthCheck, ClusterAlertsCheck,
+    ConfigStalenessCheck, NameNodeHACheck,
+)
 from checks.webhdfs import HdfsDataNodeCheck, HdfsSpaceCheck
 from checks.yarn import YarnNodeHealthCheck, YarnQueueCheck
 from checks.cloudera import ClouderaServiceHealthCheck
@@ -168,9 +171,59 @@ def test_ambari_service_health_critical():
     try:
         check  = AmbariServiceHealthCheck(config, {})
         result = check.run()
-        # STOPPED → INSTALLED → warning; UNKNOWN state → CRITICAL
-        assert result.status in (CheckResult.CRITICAL, CheckResult.WARNING), \
-            "Expected CRITICAL/WARNING, got {}: {}".format(result.status, result.message)
+        # HIVE UNKNOWN state → CRITICAL (non-INSTALLED/non-STARTED state)
+        assert result.status == CheckResult.CRITICAL, \
+            "Expected CRITICAL, got {}: {}".format(result.status, result.message)
+    finally:
+        server.shutdown()
+
+
+def test_ambari_service_health_installed_no_filter_is_ok():
+    """INSTALLED senza filtro services non deve warnare (falso positivo per client libs)."""
+    fixture = {
+        "items": [
+            {"ServiceInfo": {"service_name": "HDFS",   "state": "STARTED",   "maintenance_state": "OFF"}},
+            {"ServiceInfo": {"service_name": "YARN",   "state": "STARTED",   "maintenance_state": "OFF"}},
+            {"ServiceInfo": {"service_name": "PIG",    "state": "INSTALLED", "maintenance_state": "OFF"}},
+            {"ServiceInfo": {"service_name": "TEZ",    "state": "INSTALLED", "maintenance_state": "OFF"}},
+            {"ServiceInfo": {"service_name": "SOLR",   "state": "INSTALLED", "maintenance_state": "ON"}},
+        ]
+    }
+    route_map = {"/api/v1/clusters/": fixture}
+    server, port = start_mock_server(route_map)
+    config = {
+        "ambari_url": "http://127.0.0.1:{}".format(port),
+        "ambari_user": "admin", "ambari_pass": "admin",
+        "cluster_name": "test-cluster",
+    }
+    try:
+        result = AmbariServiceHealthCheck(config, {}).run()
+        assert result.status == CheckResult.OK, \
+            "INSTALLED client libs should not warn: {}: {}".format(result.status, result.message)
+    finally:
+        server.shutdown()
+
+
+def test_ambari_service_health_installed_with_filter_is_warning():
+    """INSTALLED su servizio nel filtro esplicito deve essere WARNING."""
+    fixture = {
+        "items": [
+            {"ServiceInfo": {"service_name": "HDFS", "state": "STARTED",   "maintenance_state": "OFF"}},
+            {"ServiceInfo": {"service_name": "YARN", "state": "INSTALLED", "maintenance_state": "OFF"}},
+        ]
+    }
+    route_map = {"/api/v1/clusters/": fixture}
+    server, port = start_mock_server(route_map)
+    config = {
+        "ambari_url": "http://127.0.0.1:{}".format(port),
+        "ambari_user": "admin", "ambari_pass": "admin",
+        "cluster_name": "test-cluster",
+        "checks": {"service_health": {"services": ["HDFS", "YARN"]}},
+    }
+    try:
+        result = AmbariServiceHealthCheck(config, {}).run()
+        assert result.status == CheckResult.WARNING, \
+            "INSTALLED in explicit filter should warn: {}: {}".format(result.status, result.message)
     finally:
         server.shutdown()
 
@@ -185,6 +238,72 @@ def test_ambari_connection_error_returns_unknown():
     check  = AmbariServiceHealthCheck(config, {})
     result = check.run()
     assert result.status == CheckResult.UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# Test: NameNodeHACheck
+# ---------------------------------------------------------------------------
+
+def test_namenode_ha_ok():
+    fixture = load_fixture("namenode_ha_ok.json")
+    route_map = {"/api/v1/clusters/": fixture}
+    server, port = start_mock_server(route_map)
+
+    config = {
+        "ambari_url": "http://127.0.0.1:{}".format(port),
+        "ambari_user": "admin", "ambari_pass": "admin",
+        "cluster_name": "test-cluster",
+    }
+    try:
+        result = NameNodeHACheck(config, {}).run()
+        assert result.status == CheckResult.OK, "{}: {}".format(result.status, result.message)
+        assert "Active" in result.message
+        assert result.details.get("active") == ["nn1.test"]
+        assert result.details.get("standby") == ["nn2.test"]
+    finally:
+        server.shutdown()
+
+
+def test_namenode_ha_no_active():
+    fixture = load_fixture("namenode_ha_no_active.json")
+    route_map = {"/api/v1/clusters/": fixture}
+    server, port = start_mock_server(route_map)
+
+    config = {
+        "ambari_url": "http://127.0.0.1:{}".format(port),
+        "ambari_user": "admin", "ambari_pass": "admin",
+        "cluster_name": "test-cluster",
+    }
+    try:
+        result = NameNodeHACheck(config, {}).run()
+        assert result.status == CheckResult.CRITICAL, \
+            "Both standby should be CRITICAL: {}: {}".format(result.status, result.message)
+    finally:
+        server.shutdown()
+
+
+def test_namenode_ha_non_ha_cluster():
+    """Cluster senza HA: ha_state assente, NN started -> OK con nota non-HA."""
+    fixture = {
+        "host_components": [
+            {"HostRoles": {"host_name": "nn1.test", "state": "STARTED", "ha_state": None}}
+        ]
+    }
+    route_map = {"/api/v1/clusters/": fixture}
+    server, port = start_mock_server(route_map)
+
+    config = {
+        "ambari_url": "http://127.0.0.1:{}".format(port),
+        "ambari_user": "admin", "ambari_pass": "admin",
+        "cluster_name": "test-cluster",
+    }
+    try:
+        result = NameNodeHACheck(config, {}).run()
+        assert result.status == CheckResult.OK, \
+            "Non-HA cluster should be OK: {}: {}".format(result.status, result.message)
+        assert result.details.get("ha_enabled") is False
+    finally:
+        server.shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -347,7 +466,12 @@ if __name__ == "__main__":
         test_base_run_raises_not_implemented,
         test_ambari_service_health_ok,
         test_ambari_service_health_critical,
+        test_ambari_service_health_installed_no_filter_is_ok,
+        test_ambari_service_health_installed_with_filter_is_warning,
         test_ambari_connection_error_returns_unknown,
+        test_namenode_ha_ok,
+        test_namenode_ha_no_active,
+        test_namenode_ha_non_ha_cluster,
         test_hdfs_datanode_ok,
         test_hdfs_datanode_critical,
         test_hdfs_datanode_no_url,

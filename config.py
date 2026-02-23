@@ -289,7 +289,25 @@ def _parse_block(lines, start, base_indent):
             rest = stripped[colon + 1:].strip()
             i += 1
 
-            if rest:
+            if rest in ('|', '|-', '|+', '>', '>-', '>+'):
+                # Literal block scalar (|) or folded scalar (>)
+                fold = rest[0] == '>'
+                block_lines = []
+                block_indent = None
+                while i < len(lines):
+                    nl = lines[i]
+                    ni = _get_indent(nl)
+                    if block_indent is None:
+                        if ni > indent:
+                            block_indent = ni
+                        else:
+                            break
+                    if ni < block_indent:
+                        break
+                    block_lines.append(nl[block_indent:])
+                    i += 1
+                result[key] = (' ' if fold else '\n').join(block_lines)
+            elif rest:
                 result[key] = _parse_scalar(rest)
             else:
                 if i < len(lines):

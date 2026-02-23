@@ -1,0 +1,19 @@
+{
+  "href": "http://localhost:8080/api/v1/clusters/test-cluster/services/HDFS/components/NAMENODE",
+  "host_components": [
+    {
+      "HostRoles": {
+        "host_name": "nn1.test",
+        "state": "STARTED",
+        "ha_state": "standby"
+      }
+    },
+    {
+      "HostRoles": {
+        "host_name": "nn2.test",
+        "state": "STARTED",
+        "ha_state": "standby"
+      }
+    }
+  ]
+}
