@@ -28,16 +28,20 @@ DEFAULT_RM_PORT = 8088
 def _rm_url(config):
     # type: (dict) -> tuple
     """
-    Restituisce (url, is_auto) del YARN Resource Manager.
-    Priorità: config[yarn][rm_url] > costruita da ambari_url:8088.
-    is_auto=True indica che l'URL è stato auto-costruito (non configurato esplicitamente).
+    Restituisce (url_or_None, is_auto) del YARN Resource Manager.
+    Priorità: config[yarn][rm_url] > costruita da ambari_url:8088 (solo HDP).
+    Restituisce (None, True) se non configurabile — il check torna SKIPPED.
     """
     yarn_cfg = config.get("yarn", {})
     if yarn_cfg.get("rm_url"):
         return yarn_cfg["rm_url"].rstrip("/"), False
 
-    # Fallback: costruiamo dall'ambari_url sostituendo host e porta
-    ambari_url = config.get("ambari_url", "http://localhost:8080")
+    # Fallback HDP only: costruiamo dall'ambari_url sostituendo host e porta.
+    # Per CDP (cm_url, no ambari_url) non possiamo auto-rilevare il RM.
+    ambari_url = config.get("ambari_url")
+    if not ambari_url:
+        return None, True
+
     try:
         if "://" in ambari_url:
             _, rest = ambari_url.split("://", 1)
@@ -46,7 +50,7 @@ def _rm_url(config):
             host = ambari_url.split("/")[0].split(":")[0]
         return "http://{}:{}".format(host, DEFAULT_RM_PORT), True
     except Exception:
-        return "http://localhost:{}".format(DEFAULT_RM_PORT), True
+        return None, True
 
 
 def _yarn_get(base_url, path, timeout=DEFAULT_TIMEOUT, no_proxy=False):
@@ -73,6 +77,12 @@ class YarnNodeHealthCheck(CheckBase):
     def run(self):
         # type: () -> CheckResult
         base, is_auto = _rm_url(self.config)
+        if base is None:
+            return CheckResult(
+                name="YarnNodeHealth",
+                status=CheckResult.SKIPPED,
+                message="yarn.rm_url not configured — add yarn.rm_url to config"
+            )
         no_proxy = self.config.get("no_proxy", False)
         try:
             data = _yarn_get(base, "nodes", no_proxy=no_proxy)
@@ -144,6 +154,12 @@ class YarnQueueCheck(CheckBase):
     def run(self):
         # type: () -> CheckResult
         base, is_auto = _rm_url(self.config)
+        if base is None:
+            return CheckResult(
+                name="YarnQueues",
+                status=CheckResult.SKIPPED,
+                message="yarn.rm_url not configured — add yarn.rm_url to config"
+            )
         no_proxy = self.config.get("no_proxy", False)
         yarn_cfg = self.config.get("checks", {}).get("yarn_queues", {})
         warn_pct = float(yarn_cfg.get("usage_warning_pct", 80))

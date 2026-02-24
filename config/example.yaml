@@ -1,83 +1,243 @@
-# HadoopScope — Example Config
+# HadoopScope — Config di esempio completo
+# =============================================================================
 # Copia in config/hadoopscope.yaml e adatta al tuo ambiente.
-# IMPORTANTE: non committare questo file con credenziali reali!
-# Usa variabili d'ambiente: ambari_pass: "${AMBARI_PASS}"
+# NON committare questo file con credenziali reali.
+#
+# Secrets — tre modalità supportate (si possono mescolare):
+#   ${ENV_VAR}                              variabile d'ambiente
+#   ${file:/run/secrets/nome}               contenuto file (Docker/k8s secret)
+#   ${cmd:vault kv get -field=pw s/name}    stdout comando (Vault, pass, AWS SM)
+#
+# Il file config/.env nella stessa directory viene caricato automaticamente.
+# Vedi config/.env.example per il template.
+# =============================================================================
 
 version: "1"
 
 environments:
+
+  # ===========================================================================
+  # HDP — Hortonworks / Ambari
+  # ===========================================================================
   prod-hdp:
     type: hdp
     enabled: true
-    ambari_url: https://ambari.corp.com:8080
-    ambari_user: admin
-    ambari_pass: "${AMBARI_PASS}"
-    cluster_name: prod-cluster
-    ambari_api_version: "v1"
 
+    # Ambari REST API — usa sempre Basic Auth anche in cluster Kerberos
+    ambari_url: https://ambari.corp.com:8080
+    ambari_user: "${AMBARI_USER}"
+    ambari_pass: "${AMBARI_PASS}"
+    cluster_name: prod-hdp-cluster
+    # ambari_api_version: "v1"   # default, raramente da cambiare
+
+    # -------------------------------------------------------------------------
+    # WebHDFS — accesso HDFS senza client Hadoop
+    # -------------------------------------------------------------------------
     webhdfs:
       url: http://namenode.corp.com:9870
       user: hdfs
-      ssl: false
 
-    # ---------------------------------------------------------------------------
-    # Kerberos (SPNEGO) — richiede kinit + curl nel PATH
-    # ---------------------------------------------------------------------------
-    # HadoopScope usa kinit per rinnovare il ticket all'avvio, poi curl --negotiate
-    # per tutte le chiamate WebHDFS (GETCONTENTSUMMARY, JMX, CREATE, DELETE).
-    # Ambari usa sempre Basic Auth (user/pass) anche in ambienti kerberizzati.
+    # -------------------------------------------------------------------------
+    # Kerberos per WebHDFS (curl+kinit sulla macchina che esegue HadoopScope)
+    # -------------------------------------------------------------------------
+    # IMPORTANTE: questo keytab deve essere SULLA MACCHINA LOCALE che esegue
+    # hadoopscope, NON sul nodo edge. HadoopScope fa kinit localmente e poi
+    # usa curl --negotiate per le chiamate WebHDFS.
+    # Ambari usa sempre Basic Auth — questo keytab NON serve per Ambari.
     #
     # Prerequisiti sul nodo che esegue HadoopScope:
     #   - kinit/klist installati  (krb5-user su Debian, krb5-workstation su RHEL)
-    #   - curl installato
-    #   - /etc/krb5.conf configurato con il realm corretto
-    #   - keytab leggibile dall'utente che esegue hadoopscope
-    #
-    # Keytab — opzioni:
-    #   keytab: /etc/security/keytabs/monitor.keytab      # path diretto
-    #   keytab: "${KEYTAB_PATH}"                           # da variabile d'ambiente
-    #   keytab: "${file:/run/secrets/monitor.keytab}"      # da Docker/k8s secret
+    #   - curl nel PATH
+    #   - /etc/krb5.conf con il realm corretto
+    #   - keytab leggibile dall'utente che esegue HadoopScope
     kerberos:
       enabled: false
-      # enabled: true
-      # keytab: "${KEYTAB_PATH}"       # path assoluto al keytab
-      # principal: monitor@CORP.COM    # principal del keytab (es. hdfs/namenode.corp.com@CORP.COM)
+      # keytab: /etc/security/keytabs/monitor.keytab   # path LOCALE assoluto
+      # keytab: "${KEYTAB_PATH}"                        # da variabile d'ambiente
+      # keytab: "${file:/run/secrets/monitor.keytab}"  # da Docker/k8s secret
+      # principal: "monitor@CORP.COM"
 
-    # ---------------------------------------------------------------------------
-    # YARN Resource Manager URL
-    # ---------------------------------------------------------------------------
-    # Se il YARN RM è su un host diverso da Ambari, specifica l'URL esplicitamente.
-    # Se omesso, HadoopScope prova a costruirlo da ambari_url:8088 (spesso sbagliato).
+    # -------------------------------------------------------------------------
+    # YARN Resource Manager
+    # -------------------------------------------------------------------------
+    # Per HDP: se omesso viene auto-rilevato da ambari_url (stesso host, porta 8088).
+    # Impostare esplicitamente se il RM è su un host diverso da Ambari.
     yarn:
       rm_url: http://yarn-rm.corp.com:8088
 
-    # ---------------------------------------------------------------------------
-    # HTTP Proxy bypass
-    # ---------------------------------------------------------------------------
-    # Se il nodo che esegue HadoopScope ha HTTP_PROXY/HTTPS_PROXY configurati
-    # (tipico in ambienti corporate), le chiamate ai cluster interni vengono
-    # bloccate dal proxy con HTTP 403/URLBlocked.
-    # Imposta no_proxy: true per bypassare il proxy per questo environment.
-    # Equivalente a: export no_proxy="*" solo per queste chiamate.
-    no_proxy: false
-    # no_proxy: true   # abilita se ottieni "HTTP 403: URLBlocked" o "connection refused"
-
+    # -------------------------------------------------------------------------
+    # Hive via Ansible + beeline (richiede ansible installato o in venv)
+    # -------------------------------------------------------------------------
+    # NOTA KEYTAB: hive.kerberos.keytab è il keytab SUL NODO EDGE (remoto),
+    # non sulla macchina che esegue HadoopScope. Ansible fa kinit sull'edge
+    # node prima di eseguire beeline. Può essere un path diverso da kerberos.keytab.
     ansible:
       edge_host: edge01.corp.com
-      ssh_user: monitor
+      ssh_user: hadoop
       ssh_key: ~/.ssh/monitor_key
-      become: false
 
+    hive:
+      beeline_path: /usr/hdp/current/hive-client/bin/beeline
+
+      # -- Config ZooKeeper (service discovery) --------------------------------
+      zookeeper_hosts:
+        - zk1.corp.com:2181
+        - zk2.corp.com:2181
+        - zk3.corp.com:2181
+
+      # Namespace singolo (senza autenticazione LDAP):
+      zookeeper_namespace: hiveserver2
+
+      # -- Oppure: multi-namespace (un beeline per namespace) ------------------
+      # user: svcaccount       # utente default ereditato dai namespace
+      # namespaces:
+      #   - name: hiveserver2           # plain Kerberos, no LDAP
+      #   - name: hiveserver2ldap       # con autenticazione LDAP
+      #     user: svcldap
+      #     password: "${HIVE_LDAP_PASS}"
+
+      # -- Kerberos client per beeline (eseguito SUL NODO EDGE via Ansible) ---
+      # Ometti se l'utente SSH sull'edge node ha già un TGT valido (kinit già
+      # fatto dalla macchina, o ticket renewal daemon attivo).
+      # kerberos:
+      #   keytab: /etc/security/keytabs/svcaccount.keytab  # path sull'EDGE NODE
+      #   client_principal: "svcaccount@CORP.COM"
+
+      # -- Principal del server HS2 (finisce nella JDBC URL) ------------------
+      # kerberos_principal: "hive/hiveserver2.corp.com@CORP.COM"
+
+    # -------------------------------------------------------------------------
+    # Proxy bypass
+    # -------------------------------------------------------------------------
+    # Imposta true se ottieni "HTTP 403: URLBlocked" nelle chiamate interne.
+    no_proxy: false
+
+  # ===========================================================================
+  # CDP — Cloudera Data Platform / Cloudera Manager
+  # ===========================================================================
+  prod-cdp:
+    type: cdp
+    enabled: true
+
+    # Cloudera Manager REST API
+    cm_url: https://cloudera-manager.corp.com:7183
+    cm_user: "${CM_USER}"
+    cm_pass: "${CM_PASS}"
+    cluster_name: prod-cdp-cluster
+    # cm_api_version: "v40"   # default, adatta alla versione CM installata
+
+    # -------------------------------------------------------------------------
+    # Kerberos per WebHDFS (curl+kinit sulla macchina che esegue HadoopScope)
+    # -------------------------------------------------------------------------
+    # Stesso meccanismo di HDP: keytab LOCALE, usato solo per le chiamate
+    # WebHDFS dirette (non per Hive/beeline che gira sull'edge node).
+    kerberos:
+      enabled: true
+      keytab: "${KEYTAB_PATH}"       # path LOCALE al keytab
+      principal: "${KRB_PRINCIPAL}"  # es. hdfs@REALM.CORP.COM
+
+    webhdfs:
+      # Se usi HttpFS (porta 14000/14001) come proxy WebHDFS:
+      #   url:          URL HttpFS — usato da HdfsSpaceCheck e HdfsWritabilityCheck
+      #   namenode_url: URL diretto del NameNode — usato da HdfsDataNodeCheck per JMX
+      # Se webhdfs.url punta già al NameNode diretto (porta 9870/9871), ometti namenode_url.
+      url: https://httpfs.corp.com:14001          # HttpFS proxy (WebHDFS API)
+      # url: https://namenode.corp.com:9871       # oppure: NameNode diretto
+      namenode_url: https://namenode.corp.com:9871  # solo se url è HttpFS
+      user: hdfs
+
+    # -------------------------------------------------------------------------
+    # YARN Resource Manager
+    # -------------------------------------------------------------------------
+    # Per CDP: OBBLIGATORIO. Non esiste auto-detect (non c'è ambari_url).
+    # Senza questa impostazione i check YARN vengono saltati (SKIPPED).
+    # Porta standard CDP: HTTP=8088, HTTPS=8090
+    yarn:
+      rm_url: http://yarn-rm.corp.com:8088   # HTTP plain
+      # rm_url: https://yarn-rm.corp.com:8090  # HTTPS se abilitato sul cluster
+
+    # -------------------------------------------------------------------------
+    # Hive via bilanciatore con SSL + Kerberos
+    # -------------------------------------------------------------------------
+    # NOTA KEYTAB:
+    #   hive.kerberos.keytab    → path SUL NODO EDGE (Ansible lo usa per kinit
+    #                             remoto prima di lanciare beeline)
+    #   kerberos.keytab         → path LOCALE (usato solo per WebHDFS curl)
+    #   hive.ssl.truststore     → path SUL NODO EDGE (beeline lo legge lì)
+    #
+    # I path locali e remoti possono essere diversi se i keytab non sono
+    # sincronizzati tra la macchina di monitoring e il nodo edge.
+    ansible:
+      edge_host: edge01.corp.com
+      ssh_user: hadoop
+      ssh_key: ~/.ssh/monitor_key
+
+    hive:
+      beeline_path: /opt/cloudera/parcels/CDH/bin/beeline
+
+      # -- Connessione diretta al bilanciatore (opzione B strutturata) ---------
+      host: hs2-lb.corp.com
+      port: 10000
+
+      # SSL — il truststore deve essere presente SUL NODO EDGE
+      ssl:
+        enabled: true
+        truststore: /var/lib/cloudera-scm-agent/agent-cert/cm-auto-global_truststore.jks
+        truststore_password: "${HS2_TRUSTSTORE_PASS}"
+
+      # Principal del server HiveServer2 (finisce nella JDBC URL come proprietà)
+      kerberos_principal: "hive/hs2-lb.corp.com@REALM.CORP.COM"
+
+      # Kerberos client per beeline (eseguito SUL NODO EDGE via Ansible)
+      # Ometti se l'utente SSH ha già un TGT valido sull'edge node.
+      kerberos:
+        keytab: /etc/security/keytabs/svcaccount.keytab  # path sull'EDGE NODE
+        client_principal: "svcaccount@REALM.CORP.COM"
+
+      # -- Alternativa: URL verbatim (opzione A — copia/incolla da beeline) ---
+      # Se usi jdbc_url, tutti i campi host/ssl/kerberos_principal sono ignorati.
+      # jdbc_url: "jdbc:hive2://hs2-lb.corp.com:10000/;ssl=true;sslTrustStore=/var/lib/cloudera-scm-agent/agent-cert/cm-auto-global_truststore.jks;trustStorePassword=${HS2_TRUSTSTORE_PASS};principal=hive/hs2-lb.corp.com@REALM.CORP.COM"
+
+      # -- Alternativa: ZooKeeper service discovery ---------------------------
+      # Se il cluster usa ZK per HS2 discovery (invece del bilanciatore):
+      # zookeeper_hosts:
+      #   - zk1.corp.com:2181
+      #   - zk2.corp.com:2181
+      #   - zk3.corp.com:2181
+      # zookeeper_namespace: hiveserver2
+
+      # -- Multi-namespace (es. plain Kerberos + LDAP) ------------------------
+      # user: svcaccount
+      # namespaces:
+      #   - name: hiveserver2
+      #   - name: hiveserver2ldap
+      #     user: svcldap
+      #     password: "${HIVE_LDAP_PASS}"
+
+      user: "${HIVE_USER}"
+      # password: "${HIVE_PASS}"   # solo per autenticazione LDAP/PAM
+
+    # -------------------------------------------------------------------------
+    # Proxy bypass
+    # -------------------------------------------------------------------------
+    no_proxy: false
+
+
+# =============================================================================
+# Check globali (condivisi da tutti gli environment, override per-env possibile)
+# =============================================================================
 checks:
   service_health:
     enabled: true
+    # HDP: filtra per servizio (HDFS, YARN, HIVE, HBASE, OOZIE, ZOOKEEPER)
+    # CDP: usa healthSummary CM (BAD → CRITICAL, CONCERNING → WARNING)
     services: [HDFS, YARN, HIVE, HBASE, OOZIE, ZOOKEEPER]
     alert_on: [CRITICAL, WARNING]
 
   namenode_ha:
     enabled: true
-    # ha_enabled: true   # Ambari 2.6.x non espone ha_state → imposta true se il cluster
-    #                    # ha HA attiva, per avere OK invece di WARNING
+    # ha_enabled: true   # Ambari 2.6.x: imposta true se il cluster ha HA attiva
+    #                    # (HostRoles.ha_state non affidabile su quella versione)
 
   hdfs_space:
     enabled: true
@@ -98,27 +258,32 @@ checks:
     warning_threshold: 1
     critical_threshold: 3
 
-  small_files:
+  yarn_queues:
     enabled: true
-    paths: [/user/hive/warehouse]
-    threshold_avg_mb: 128
+    usage_warning_pct: 80
+    usage_critical_pct: 90
 
-  hive_partitions:
-    enabled: true
-    databases: [default]
-    warning_threshold: 5000
-    critical_threshold: 10000
 
+# =============================================================================
+# Alert
+# =============================================================================
 alerts:
   email:
     enabled: false
     smtp_host: smtp.corp.com
     smtp_port: 587
     smtp_tls: true
+    smtp_user: "${SMTP_USER}"
+    smtp_pass: "${SMTP_PASS}"
     from_addr: hadoopscope@corp.com
     to:
       - hadoop-ops@corp.com
     on_severity: [WARNING, CRITICAL]
+
+  webhook:
+    enabled: false
+    url: https://hooks.corp.com/hadoopscope
+    # secret: "${WEBHOOK_SECRET}"   # aggiunto come header X-HadoopScope-Secret
 
   zabbix:
     enabled: false
@@ -128,10 +293,14 @@ alerts:
   log:
     enabled: true
     path: /tmp/hadoopscope-logs/
-    format: text
+    format: text   # text | json
     rotate_days: 30
 
+
+# =============================================================================
+# Output
+# =============================================================================
 output:
-  format: text
+  format: text   # text | json
   verbosity: normal
   color: true

@@ -32,12 +32,22 @@ def _build_beeline_url(hive_cfg):
     # type: (dict) -> str
     """Build JDBC URL for beeline.
 
-    ZooKeeper mode (if zookeeper_hosts is set):
-      jdbc:hive2://zk1:2181,zk2:2181/[;serviceDiscoveryMode=zooKeeper;zooKeeperNamespace=<ns>]
+    If jdbc_url is set, it is returned verbatim — bypasses all other params.
+    Use this for load-balancer or complex SSL/Kerberos setups.
 
-    Direct mode (fallback):
-      jdbc:hive2://host:port/database
+    ZooKeeper mode (if zookeeper_hosts is set):
+      jdbc:hive2://zk1:2181,zk2:2181/[;serviceDiscoveryMode=zooKeeper;zooKeeperNamespace=<ns>][;ssl=true;...]
+
+    Direct / load-balancer mode (fallback):
+      jdbc:hive2://host:port/[;ssl=true;sslTrustStore=...;trustStorePassword=...][;principal=...]
+
+    SSL params come from hive.ssl.{enabled,truststore,truststore_password}.
+    Kerberos JDBC principal comes from hive.kerberos_principal.
     """
+    # Verbatim JDBC URL — user provides the complete connection string
+    if hive_cfg.get("jdbc_url"):
+        return hive_cfg["jdbc_url"]
+
     zk_hosts = hive_cfg.get("zookeeper_hosts")
     if zk_hosts:
         if isinstance(zk_hosts, list):
@@ -53,7 +63,56 @@ def _build_beeline_url(hive_cfg):
         port = hive_cfg.get("port", 10000)
         db   = hive_cfg.get("database", "default")
         url  = "jdbc:hive2://{}:{}/{}".format(host, port, db)
+
+    # SSL JDBC properties (appended to ZooKeeper and direct mode alike)
+    ssl_cfg = hive_cfg.get("ssl", {})
+    if ssl_cfg.get("enabled"):
+        url += ";ssl=true"
+        if ssl_cfg.get("truststore"):
+            url += ";sslTrustStore={}".format(ssl_cfg["truststore"])
+        if ssl_cfg.get("truststore_password"):
+            url += ";trustStorePassword={}".format(ssl_cfg["truststore_password"])
+
+    # Kerberos principal as JDBC property
+    krb_principal = hive_cfg.get("kerberos_principal")
+    if krb_principal:
+        url += ";principal={}".format(krb_principal)
+
     return url
+
+
+def _build_kinit_cmd(hive_cfg):
+    # type: (dict) -> object
+    """Return kinit shell command if hive.kerberos.keytab/client_principal are set, else None.
+
+    The keytab and client_principal must be paths/values on the EDGE NODE,
+    not on the machine running hadoopscope. The command is injected into the
+    Ansible playbook shell block and executed remotely before beeline.
+    """
+    krb = hive_cfg.get("kerberos", {})
+    if not isinstance(krb, dict):
+        return None
+    keytab   = krb.get("keytab")
+    client_p = krb.get("client_principal")
+    if keytab and client_p:
+        return "kinit -kt {keytab} {principal}".format(
+            keytab=keytab, principal=client_p
+        )
+    return None
+
+
+def _label_from_cfg(hive_cfg):
+    # type: (dict) -> str
+    """Return a short human-readable label for a HiveServer2 instance."""
+    if hive_cfg.get("zookeeper_namespace"):
+        return hive_cfg["zookeeper_namespace"]
+    if hive_cfg.get("jdbc_url"):
+        try:
+            after_proto = hive_cfg["jdbc_url"].split("//", 1)[1]
+            return after_proto.split("/")[0].split(";")[0]
+        except (IndexError, AttributeError):
+            return "hive"
+    return "{}:{}".format(hive_cfg.get("host", "localhost"), hive_cfg.get("port", 10000))
 
 
 def _build_beeline_cmd(hive_cfg, default_user):
@@ -83,9 +142,10 @@ def _merge_ns_cfg(hive_cfg, ns_entry):
     """Build per-namespace config by merging parent hive_cfg with namespace overrides.
 
     Rules:
-    - zookeeper_hosts, host, port, database inherited from parent
+    - zookeeper_hosts, host, port, database, ssl, kerberos_principal inherited from parent
     - user: namespace override wins, else parent hive.user
     - password: NOT inherited from parent — each namespace declares its own
+    - jdbc_url: namespace override wins (allows different LB URL per namespace)
     - zookeeper_namespace: taken from ns_entry["name"]
     """
     merged = {k: v for k, v in hive_cfg.items() if k not in ("namespaces", "password")}
@@ -94,6 +154,8 @@ def _merge_ns_cfg(hive_cfg, ns_entry):
         merged["user"] = ns_entry["user"]
     if "password" in ns_entry:
         merged["password"] = ns_entry["password"]
+    if "jdbc_url" in ns_entry:
+        merged["jdbc_url"] = ns_entry["jdbc_url"]
     return merged
 
 
@@ -186,10 +248,7 @@ class HiveCheck(CheckBase):
             ]
         else:
             # Single-instance (backward compat)
-            hive_user = hive_cfg.get("user", ssh_user)
-            label = hive_cfg.get("zookeeper_namespace") or "{}:{}".format(
-                hive_cfg.get("host", "localhost"), hive_cfg.get("port", 10000))
-            instances = [(label, hive_cfg)]
+            instances = [(_label_from_cfg(hive_cfg), hive_cfg)]
 
         _debug.log("HiveCheck", "ansible_bin: {}".format(ansible_bin))
         _debug.log("HiveCheck", "edge_host: {}".format(edge_host))
@@ -199,11 +258,15 @@ class HiveCheck(CheckBase):
         ok_names = []
         failed = []
         for inst_name, inst_cfg in instances:
-            inst_user = inst_cfg.get("user", ssh_user)
-            cmd = _build_beeline_cmd(inst_cfg, inst_user)
-            tag = "HiveCheck[{}]".format(inst_name)
+            inst_user  = inst_cfg.get("user", ssh_user)
+            cmd        = _build_beeline_cmd(inst_cfg, inst_user)
+            kinit_cmd  = _build_kinit_cmd(inst_cfg)
+            tag        = "HiveCheck[{}]".format(inst_name)
             _debug.log(tag, "beeline_cmd: {}".format(cmd))
-            rc, out, err = self._run_playbook(ansible_bin, inventory, cmd, tag)
+            if kinit_cmd:
+                _debug.log(tag, "kinit_cmd (edge node): {}".format(kinit_cmd))
+            rc, out, err = self._run_playbook(ansible_bin, inventory, cmd, tag,
+                                              kinit_cmd=kinit_cmd)
             if rc == 0:
                 ok_names.append(inst_name)
             else:
@@ -271,15 +334,27 @@ class HiveCheck(CheckBase):
             key=ssh_key or "~/.ssh/id_rsa"
         )
 
-    def _run_playbook(self, ansible_bin, inventory_content, beeline_cmd, tag="HiveCheck"):
-        # type: (str, str, str, str) -> tuple
-        """Run Ansible playbook with beeline command.
+    def _run_playbook(self, ansible_bin, inventory_content, beeline_cmd,
+                      tag="HiveCheck", kinit_cmd=None):
+        # type: (str, str, str, str, object) -> tuple
+        """Run Ansible playbook with optional kinit + beeline command.
+
+        kinit_cmd: if set, a 'kinit -kt <keytab> <principal>' command run on the
+        edge node BEFORE beeline. Both keytab and principal must be paths/values
+        on the edge node, not on the machine running hadoopscope.
 
         Returns (rc, stdout, stderr):
           rc >= 0  : actual Ansible exit code
           rc == -1 : subprocess timeout (60s)
           rc == -2 : unexpected exception (err contains message)
         """
+        if kinit_cmd:
+            shell_lines = "        {kinit}\n        {beeline}".format(
+                kinit=kinit_cmd, beeline=beeline_cmd
+            )
+        else:
+            shell_lines = "        {}".format(beeline_cmd)
+
         playbook = (
             "---\n"
             "- name: HiveCheck\n"
@@ -288,10 +363,10 @@ class HiveCheck(CheckBase):
             "  tasks:\n"
             "    - name: Beeline test\n"
             "      shell: |\n"
-            "        {cmd}\n"
+            "{shell_lines}\n"
             "      register: r\n"
             "    - debug: var=r.stdout\n"
-        ).format(cmd=beeline_cmd)
+        ).format(shell_lines=shell_lines)
 
         inv_path = play_path = None
         try:

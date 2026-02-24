@@ -194,6 +194,50 @@ GET http://{rm}:8088/ws/v1/cluster/scheduler → schedulerInfo.queues[].usedCapa
 - Kerberos keytab: sempre path assoluto o env var
 - File config con credenziali reali vanno nel `.gitignore`
 
+### Kerberos — due contesti distinti, due keytab diversi
+
+| Chiave config | Dove viene usato | Dove deve esistere il file |
+|---|---|---|
+| `kerberos.keytab` | WebHDFS checks: `kinit -kt` locale + `curl --negotiate` | **Macchina locale** che esegue HadoopScope |
+| `hive.kerberos.keytab` | HiveCheck: `kinit -kt` iniettato nel playbook Ansible | **Nodo edge** remoto (dove gira beeline) |
+| `hive.ssl.truststore` | Beeline JDBC URL property `sslTrustStore=...` | **Nodo edge** remoto (dove gira beeline) |
+
+**Regola**: i path in `hive.kerberos.*` e `hive.ssl.*` sono sempre path sul nodo edge,
+mai sulla macchina locale. Possono essere diversi dal path in `kerberos.keytab`.
+Non esiste fallback incrociato: `HiveCheck` legge solo `hive.kerberos`, mai il top-level `kerberos`.
+
+### HiveServer2 — modalità di connessione
+
+Due modalità supportate in `hive.`:
+
+1. **`jdbc_url` verbatim** — URL completo passato direttamente a beeline (bypassa tutto):
+   ```yaml
+   hive:
+     jdbc_url: "jdbc:hive2://lb:10000/;ssl=true;sslTrustStore=...;principal=..."
+   ```
+
+2. **Config strutturata** — HadoopScope costruisce l'URL dai parametri:
+   ```yaml
+   hive:
+     host: lb.corp.com          # oppure: zookeeper_hosts: [zk1:2181, ...]
+     port: 10000
+     ssl:
+       enabled: true
+       truststore: /path/on/edge/node/truststore.jks
+       truststore_password: "${HS2_TRUSTSTORE_PASS}"
+     kerberos_principal: "hive/lb.corp.com@REALM"   # server principal (JDBC URL)
+     kerberos:
+       keytab: /path/on/edge/node/client.keytab     # client kinit (edge node)
+       client_principal: "svc@REALM"
+   ```
+
+### YARN — auto-detect solo per HDP
+
+`YarnNodeHealthCheck` e `YarnQueueCheck`:
+- **HDP**: se `yarn.rm_url` non è configurato, tenta auto-detect dall'host di `ambari_url` porta 8088
+- **CDP**: se `yarn.rm_url` non è configurato → `SKIPPED` (non c'è `ambari_url` per l'auto-detect)
+- Se il proxy aziendale blocca le chiamate → `HTTP 403: URLBlocked` → imposta `no_proxy: true`
+
 **Schema minimo valido per test:**
 ```yaml
 version: "1"

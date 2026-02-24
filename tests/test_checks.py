@@ -27,7 +27,7 @@ from checks.ambari import (
 from checks.webhdfs import HdfsDataNodeCheck, HdfsSpaceCheck
 from checks.yarn import YarnNodeHealthCheck, YarnQueueCheck
 from checks.cloudera import ClouderaServiceHealthCheck
-from checks.hive import _build_beeline_url, _build_beeline_cmd, _merge_ns_cfg, _zk_host_str
+from checks.hive import _build_beeline_url, _build_beeline_cmd, _merge_ns_cfg, _zk_host_str, _label_from_cfg
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -896,6 +896,105 @@ def test_beeline_cmd_custom_path():
     cfg = {"host": "hs2", "port": 10000, "beeline_path": "/opt/hive/bin/beeline"}
     cmd = _build_beeline_cmd(cfg, "hive")
     assert cmd.startswith("/opt/hive/bin/beeline"), cmd
+
+
+def test_beeline_url_verbatim_jdbc_url():
+    """jdbc_url is returned unchanged — bypasses all other config."""
+    raw = (
+        "jdbc:hive2://lb.example.com:10000/;"
+        "ssl=true;sslTrustStore=/etc/ssl/hs2.jks;trustStorePassword=s3cr3t;"
+        "principal=hive/lb.example.com@REALM.COM"
+    )
+    cfg = {"jdbc_url": raw, "host": "ignored", "zookeeper_hosts": ["ignored:2181"]}
+    assert _build_beeline_url(cfg) == raw
+
+
+def test_beeline_url_ssl_structured():
+    """SSL params are appended to direct-mode URL."""
+    cfg = {
+        "host": "hs2.example.com",
+        "port": 10000,
+        "ssl": {
+            "enabled": True,
+            "truststore": "/etc/ssl/hs2.jks",
+            "truststore_password": "s3cr3t",
+        },
+    }
+    url = _build_beeline_url(cfg)
+    assert "ssl=true" in url, url
+    assert "sslTrustStore=/etc/ssl/hs2.jks" in url, url
+    assert "trustStorePassword=s3cr3t" in url, url
+
+
+def test_beeline_url_ssl_with_kerberos_principal():
+    """kerberos_principal appended as JDBC property."""
+    cfg = {
+        "host": "hs2.example.com",
+        "port": 10000,
+        "ssl": {"enabled": True, "truststore": "/etc/ssl/hs2.jks", "truststore_password": "pw"},
+        "kerberos_principal": "hive/hs2.example.com@REALM.COM",
+    }
+    url = _build_beeline_url(cfg)
+    assert "principal=hive/hs2.example.com@REALM.COM" in url, url
+
+
+def test_beeline_url_ssl_zk_mode():
+    """SSL params also append to ZooKeeper-mode URL."""
+    cfg = {
+        "zookeeper_hosts": ["zk1:2181", "zk2:2181"],
+        "zookeeper_namespace": "hiveserver2",
+        "ssl": {"enabled": True, "truststore": "/etc/ssl/hs2.jks", "truststore_password": "pw"},
+        "kerberos_principal": "hive/_HOST@REALM",
+    }
+    url = _build_beeline_url(cfg)
+    assert "serviceDiscoveryMode=zooKeeper" in url, url
+    assert "ssl=true" in url, url
+    assert "principal=hive/_HOST@REALM" in url, url
+
+
+def test_beeline_url_ssl_disabled_not_appended():
+    """ssl.enabled=False means no SSL params in URL."""
+    cfg = {
+        "host": "hs2.example.com",
+        "port": 10000,
+        "ssl": {"enabled": False, "truststore": "/etc/ssl/hs2.jks"},
+    }
+    url = _build_beeline_url(cfg)
+    assert "ssl" not in url, url
+
+
+def test_merge_ns_cfg_jdbc_url_override():
+    """Namespace entry can override jdbc_url from parent."""
+    parent = {
+        "jdbc_url": "jdbc:hive2://lb1:10000/;ssl=true",
+        "user": "svc",
+    }
+    ns = {"name": "ns1", "jdbc_url": "jdbc:hive2://lb2:10000/;ssl=true"}
+    merged = _merge_ns_cfg(parent, ns)
+    assert merged["jdbc_url"] == "jdbc:hive2://lb2:10000/;ssl=true"
+
+
+def test_merge_ns_cfg_jdbc_url_inherited():
+    """Namespace entry inherits jdbc_url from parent if not overridden."""
+    parent = {"jdbc_url": "jdbc:hive2://lb:10000/;ssl=true", "user": "svc"}
+    ns = {"name": "ns1"}
+    merged = _merge_ns_cfg(parent, ns)
+    assert merged["jdbc_url"] == "jdbc:hive2://lb:10000/;ssl=true"
+
+
+def test_label_from_cfg_zk_namespace():
+    cfg = {"zookeeper_namespace": "hiveserver2ldap"}
+    assert _label_from_cfg(cfg) == "hiveserver2ldap"
+
+
+def test_label_from_cfg_jdbc_url():
+    cfg = {"jdbc_url": "jdbc:hive2://lb.example.com:10000/;ssl=true"}
+    assert _label_from_cfg(cfg) == "lb.example.com:10000"
+
+
+def test_label_from_cfg_direct():
+    cfg = {"host": "hs2.example.com", "port": 10001}
+    assert _label_from_cfg(cfg) == "hs2.example.com:10001"
 
 
 def test_yaml_parser_hostport_as_string():

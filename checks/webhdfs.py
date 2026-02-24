@@ -317,8 +317,21 @@ class HdfsDataNodeCheck(CheckBase):
                 message="webhdfs.url not configured"
             )
 
-        # JMX endpoint: stesso host del NameNode HTTP, senza /webhdfs/v1
-        jmx_base = base_url.replace("/webhdfs/v1", "").rstrip("/")
+        # JMX endpoint: usa namenode_url se configurato (necessario quando webhdfs.url
+        # punta a HttpFS, porta 14000/14001, che non espone JMX).
+        # Se omesso, si usa webhdfs.url (corretto quando punta direttamente al NameNode).
+        namenode_url = hdfs_cfg.get("namenode_url") or base_url
+        if not hdfs_cfg.get("namenode_url") and (":14000" in base_url or ":14001" in base_url):
+            return CheckResult(
+                name="HdfsDataNodes",
+                status=CheckResult.SKIPPED,
+                message=(
+                    "webhdfs.url points to HttpFS (port 14000/14001) which has no JMX endpoint. "
+                    "Add webhdfs.namenode_url pointing to the NameNode directly "
+                    "(e.g. https://namenode.host:9871)"
+                )
+            )
+        jmx_base = namenode_url.replace("/webhdfs/v1", "").rstrip("/")
         jmx_url  = "{}/jmx?qry=Hadoop:service=NameNode,name=FSNamesystemState".format(jmx_base)
 
         use_krb, keytab, principal = _get_kerberos_cfg(self.config)

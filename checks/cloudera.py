@@ -148,10 +148,17 @@ class ClouderaParcelCheck(CheckBase):
             client = _make_cm_client(self.config)
             data   = client.get("parcels")
         except IOError as e:
+            msg = str(e)
+            if "403" in msg:
+                return CheckResult(
+                    name="ClouderaParcels",
+                    status=CheckResult.SKIPPED,
+                    message="Parcels check skipped — 403 Forbidden (CM user needs Cluster Administrator role)"
+                )
             return CheckResult(
                 name="ClouderaParcels",
                 status=CheckResult.UNKNOWN,
-                message=str(e)
+                message=msg
             )
 
         parcels = data.get("items", [])
