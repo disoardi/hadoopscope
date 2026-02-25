@@ -198,7 +198,8 @@ GET http://{rm}:8088/ws/v1/cluster/scheduler → schedulerInfo.queues[].usedCapa
 
 | Chiave config | Dove viene usato | Dove deve esistere il file |
 |---|---|---|
-| `kerberos.keytab` | WebHDFS checks: `kinit -kt` locale + `curl --negotiate` | **Macchina locale** che esegue HadoopScope |
+| `kerberos.keytab` | WebHDFS checks locali: `kinit -kt` + `curl --negotiate` | **Macchina locale** che esegue HadoopScope |
+| `webhdfs.kerberos.keytab` | WebHDFS checks `via_ansible=true`: kinit sull'edge node (override di `kerberos.keytab`) | **Nodo edge** remoto |
 | `hive.kerberos.keytab` | HiveCheck: `kinit -kt` iniettato nel playbook Ansible | **Nodo edge** remoto (dove gira beeline) |
 | `hive.ssl.truststore` | Beeline JDBC URL property `sslTrustStore=...` | **Nodo edge** remoto (dove gira beeline) |
 

@@ -156,10 +156,15 @@ environments:
       ssl_insecure: false   # true = curl --insecure (disabilita verifica cert SSL)
       #                     # usare se la CA del cluster non è nel trust store di sistema
       via_ansible: false    # true = delega curl all'edge node via Ansible
-      #                     # usare quando HttpFS/NameNode non sono raggiungibili localmente
-      #                     # NOTA: in modalità via_ansible, kerberos.keytab deve
-      #                     # esistere sull'edge node (non sulla macchina locale)
+      #                     # utile quando HttpFS/NameNode non sono raggiungibili localmente
       timeout: 30           # timeout curl in secondi (HttpFS+SSL+Kerberos può essere lento)
+
+      # Kerberos per via_ansible — path SULL'EDGE NODE (può differire da kerberos.keytab)
+      # Usare quando il keytab su edge node è in un path diverso da kerberos.keytab sopra.
+      # Se omesso, via_ansible usa kerberos.keytab/principal (top-level) come fallback.
+      # kerberos:
+      #   keytab: /etc/security/keytabs/hdfs.keytab   # path sull'EDGE NODE
+      #   principal: "hdfs/namenode.corp.com@REALM"   # principal per kinit sull'edge node
 
     # -------------------------------------------------------------------------
     # YARN Resource Manager

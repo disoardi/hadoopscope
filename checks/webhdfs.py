@@ -201,12 +201,32 @@ def _webhdfs_get(base_url, path, op, user, extra_params="",
 
 def _get_kerberos_cfg(config):
     # type: (dict) -> tuple
-    """Legge la configurazione Kerberos. Restituisce (enabled, keytab, principal)."""
+    """Legge la configurazione Kerberos locale. Restituisce (enabled, keytab, principal).
+    Usato per i curl eseguiti LOCALMENTE (via_ansible=false).
+    """
     krb = config.get("kerberos", {})
     enabled   = krb.get("enabled", False)
     keytab    = krb.get("keytab", "")
     principal = krb.get("principal", "")
     return enabled, keytab, principal
+
+
+def _get_ansible_kerberos_cfg(config):
+    # type: (dict) -> tuple
+    """Kerberos config per via_ansible: usa webhdfs.kerberos se presente,
+    altrimenti ricade su kerberos top-level.
+
+    webhdfs.kerberos.keytab/principal → path/principal SULL'EDGE NODE.
+    Usare quando il keytab sull'edge node è in un path diverso da kerberos.keytab.
+    Se webhdfs.kerberos non è configurato, usa kerberos.keytab (top-level).
+    """
+    whdfs_krb = config.get("webhdfs", {}).get("kerberos", {})
+    if whdfs_krb.get("keytab"):
+        use_krb   = config.get("kerberos", {}).get("enabled", True)
+        keytab    = whdfs_krb["keytab"]
+        principal = whdfs_krb.get("principal", "")
+        return use_krb, keytab, principal
+    return _get_kerberos_cfg(config)
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +395,7 @@ class HdfsSpaceCheck(CheckBase):
             )
 
         use_krb, keytab, principal = _get_kerberos_cfg(self.config)
+        ansi_krb, ansi_keytab, ansi_principal = _get_ansible_kerberos_cfg(self.config)
         if not via_ansible and use_krb:
             try:
                 _kinit(keytab, principal)
@@ -394,8 +415,8 @@ class HdfsSpaceCheck(CheckBase):
             crit_pct = path_cfg.get("critical_pct", 90)
             try:
                 if via_ansible:
-                    kinit_line    = "kinit -kt {} {}\n".format(keytab, principal) \
-                        if (use_krb and keytab and principal) else ""
+                    kinit_line    = "kinit -kt {} {}\n".format(ansi_keytab, ansi_principal) \
+                        if (ansi_krb and ansi_keytab and ansi_principal) else ""
                     insecure_flag = "--insecure" if insecure else ""
                     url    = "{}/webhdfs/v1{}?op=GETCONTENTSUMMARY".format(
                         base_url.rstrip("/"), path)
@@ -499,11 +520,12 @@ class HdfsDataNodeCheck(CheckBase):
         jmx_url  = "{}/jmx?qry=Hadoop:service=NameNode,name=FSNamesystemState".format(jmx_base)
 
         use_krb, keytab, principal = _get_kerberos_cfg(self.config)
+        ansi_krb, ansi_keytab, ansi_principal = _get_ansible_kerberos_cfg(self.config)
 
         try:
             if via_ansible:
-                kinit_line    = "kinit -kt {} {}\n".format(keytab, principal) \
-                    if (use_krb and keytab and principal) else ""
+                kinit_line    = "kinit -kt {} {}\n".format(ansi_keytab, ansi_principal) \
+                    if (ansi_krb and ansi_keytab and ansi_principal) else ""
                 insecure_flag = "--insecure" if insecure else ""
                 script = "{}curl -s --fail {} --negotiate -u : '{}'".format(
                     kinit_line, insecure_flag, jmx_url)
@@ -598,6 +620,7 @@ class HdfsWritabilityCheck(CheckBase):
 
         timeout  = int(hdfs_cfg.get("timeout", DEFAULT_TIMEOUT))
         use_krb, keytab, principal = _get_kerberos_cfg(self.config)
+        ansi_krb, ansi_keytab, ansi_principal = _get_ansible_kerberos_cfg(self.config)
 
         if not via_ansible and use_krb:
             try:
@@ -614,8 +637,8 @@ class HdfsWritabilityCheck(CheckBase):
             test_path_ts = "{}-{}".format(test_path, int(time.time()))
 
             if via_ansible:
-                kinit_line    = "kinit -kt {} {}\n".format(keytab, principal) \
-                    if (use_krb and keytab and principal) else ""
+                kinit_line    = "kinit -kt {} {}\n".format(ansi_keytab, ansi_principal) \
+                    if (ansi_krb and ansi_keytab and ansi_principal) else ""
                 insecure_flag = "--insecure" if insecure else ""
                 create_url = "{}/webhdfs/v1{}?op=CREATE&overwrite=true".format(
                     base_url.rstrip("/"), test_path_ts)
