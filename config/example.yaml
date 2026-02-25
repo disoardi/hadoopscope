@@ -36,6 +36,14 @@ environments:
     webhdfs:
       url: http://namenode.corp.com:9870
       user: hdfs
+      # ssl_insecure: false   # true = curl --insecure (disabilita verifica certificato SSL)
+      #                       # usare solo con CA interna non installata nel trust store
+      # via_ansible: false    # true = esegui curl sull'edge node via Ansible
+      #                       # utile quando WebHDFS/NameNode non sono raggiungibili
+      #                       # dalla macchina che esegue hadoopscope (firewall/routing)
+      #                       # NOTA: in modalità via_ansible, kerberos.keytab deve
+      #                       # esistere sull'edge node (non sulla macchina locale)
+      # timeout: 10           # timeout curl in secondi (default: 10)
 
     # -------------------------------------------------------------------------
     # Kerberos per WebHDFS (curl+kinit sulla macchina che esegue HadoopScope)
@@ -141,10 +149,17 @@ environments:
       #   url:          URL HttpFS — usato da HdfsSpaceCheck e HdfsWritabilityCheck
       #   namenode_url: URL diretto del NameNode — usato da HdfsDataNodeCheck per JMX
       # Se webhdfs.url punta già al NameNode diretto (porta 9870/9871), ometti namenode_url.
-      url: https://httpfs.corp.com:14001          # HttpFS proxy (WebHDFS API)
-      # url: https://namenode.corp.com:9871       # oppure: NameNode diretto
-      namenode_url: https://namenode.corp.com:9871  # solo se url è HttpFS
+      url: https://httpfs.corp.com:14001            # HttpFS proxy (WebHDFS API)
+      # url: https://namenode.corp.com:9871         # oppure: NameNode diretto
+      namenode_url: https://namenode.corp.com:9871  # solo se url è HttpFS (porta 14000/14001)
       user: hdfs
+      ssl_insecure: false   # true = curl --insecure (disabilita verifica cert SSL)
+      #                     # usare se la CA del cluster non è nel trust store di sistema
+      via_ansible: false    # true = delega curl all'edge node via Ansible
+      #                     # usare quando HttpFS/NameNode non sono raggiungibili localmente
+      #                     # NOTA: in modalità via_ansible, kerberos.keytab deve
+      #                     # esistere sull'edge node (non sulla macchina locale)
+      timeout: 30           # timeout curl in secondi (HttpFS+SSL+Kerberos può essere lento)
 
     # -------------------------------------------------------------------------
     # YARN Resource Manager
