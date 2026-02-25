@@ -161,12 +161,21 @@ class ClouderaParcelCheck(CheckBase):
                 message=msg
             )
 
+        ignore_raw = (
+            self.config.get("checks", {})
+                       .get("parcels", {})
+                       .get("ignore", [])
+        )
+        ignore = set(x.upper() for x in ignore_raw)
+
         parcels = data.get("items", [])
         not_activated = []
         for p in parcels:
             product = p.get("product", "?")
             version = p.get("version", "?")
             stage   = p.get("stage", "UNKNOWN")
+            if product.upper() in ignore:
+                continue
             if stage != "ACTIVATED":
                 not_activated.append("{}-{} ({})".format(product, version, stage))
 
@@ -181,4 +190,101 @@ class ClouderaParcelCheck(CheckBase):
             name="ClouderaParcels",
             status=CheckResult.OK,
             message="All {} parcel(s) ACTIVATED".format(len(parcels))
+        )
+
+
+class ClouderaNameNodeHACheck(CheckBase):
+    """Verifica stato HA NameNode tramite Cloudera Manager API (ruoli HDFS).
+
+    Usa GET /clusters/{cluster}/services/hdfs/roles e filtra i NAMENODE.
+    Ogni role espone `haStatus` (ACTIVE/STANDBY) e `roleState` (STARTED/STOPPED).
+    """
+
+    requires = []  # pura API REST
+
+    def run(self):
+        # type: () -> CheckResult
+        try:
+            client = _make_cm_client(self.config)
+            data   = client.get("services/hdfs/roles")
+        except IOError as e:
+            msg = str(e)
+            # Il servizio HDFS potrebbe chiamarsi diversamente (hdfs1, ecc.)
+            # o l'utente potrebbe non avere permessi — restituiamo UNKNOWN non CRITICAL
+            return CheckResult(
+                name="NameNodeHA",
+                status=CheckResult.UNKNOWN,
+                message="CM roles API error: {}".format(msg)
+            )
+
+        roles = data.get("items", [])
+        namenodes = [r for r in roles if r.get("type") == "NAMENODE"]
+
+        if not namenodes:
+            return CheckResult(
+                name="NameNodeHA",
+                status=CheckResult.UNKNOWN,
+                message="No NAMENODE roles found in CM (check hdfs service name)"
+            )
+
+        active  = []
+        standby = []
+        stopped = []
+        unknown = []
+
+        for nn in namenodes:
+            name       = nn.get("name", "?")
+            host_ref   = nn.get("hostRef", {})
+            hostname   = host_ref.get("hostname", name)
+            short_host = hostname.split(".")[0]
+            role_state = nn.get("roleState", "")
+            ha_status  = (nn.get("haStatus") or "").upper()
+
+            if role_state != "STARTED":
+                stopped.append(short_host)
+            elif ha_status == "ACTIVE":
+                active.append(short_host)
+            elif ha_status == "STANDBY":
+                standby.append(short_host)
+            else:
+                unknown.append(short_host)
+
+        # Non-HA: un solo NN avviato, senza haStatus
+        if len(namenodes) == 1:
+            if stopped:
+                return CheckResult(
+                    name="NameNodeHA",
+                    status=CheckResult.CRITICAL,
+                    message="NameNode STOPPED: {}".format(", ".join(stopped))
+                )
+            return CheckResult(
+                name="NameNodeHA",
+                status=CheckResult.OK,
+                message="NameNode running (non-HA): {}".format(
+                    ", ".join(active + unknown))
+            )
+
+        # HA: ci aspettiamo esattamente 1 active + 1 standby
+        problems = []
+        if len(active) != 1:
+            problems.append("{} active NameNode(s) (expected 1)".format(len(active)))
+        if not standby:
+            problems.append("no standby NameNode")
+        if stopped:
+            problems.append("stopped: {}".format(", ".join(stopped)))
+
+        if problems:
+            return CheckResult(
+                name="NameNodeHA",
+                status=CheckResult.CRITICAL,
+                message="HA problem — {}".format("; ".join(problems)),
+                details={"active": active, "standby": standby, "stopped": stopped}
+            )
+
+        return CheckResult(
+            name="NameNodeHA",
+            status=CheckResult.OK,
+            message="NameNode HA OK — active: {}, standby: {}".format(
+                ", ".join(active), ", ".join(standby)),
+            details={"active": active, "standby": standby}
         )
