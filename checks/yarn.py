@@ -4,6 +4,7 @@ from __future__ import print_function
 
 import json
 import socket
+import subprocess
 
 try:
     from urllib.request import urlopen, Request, build_opener, ProxyHandler
@@ -53,9 +54,27 @@ def _rm_url(config):
         return None, True
 
 
-def _yarn_get(base_url, path, timeout=DEFAULT_TIMEOUT, no_proxy=False):
-    # type: (str, str, int, bool) -> dict
+def _yarn_get(base_url, path, timeout=DEFAULT_TIMEOUT, no_proxy=False, kerberos=False):
+    # type: (str, str, int, bool, bool) -> dict
     url = "{}/ws/v1/cluster/{}".format(base_url, path.lstrip("/"))
+
+    if kerberos:
+        cmd = ["curl", "-s", "--fail", "--max-time", str(timeout),
+               "--negotiate", "-u", ":"]
+        if no_proxy:
+            cmd += ["--noproxy", "*"]
+        cmd.append(url)
+        try:
+            out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL,
+                                          timeout=timeout + 5)
+            return json.loads(out.decode("utf-8"))
+        except subprocess.CalledProcessError as e:
+            raise IOError("YARN HTTP error (curl exit {}): {}".format(e.returncode, url))
+        except subprocess.TimeoutExpired:
+            raise IOError("YARN timeout ({}s) — {}".format(timeout, url))
+        except OSError:
+            raise IOError("curl non trovato nel PATH")
+
     try:
         req = Request(url)
         req.add_header("Accept", "application/json")
@@ -84,8 +103,9 @@ class YarnNodeHealthCheck(CheckBase):
                 message="yarn.rm_url not configured — add yarn.rm_url to config"
             )
         no_proxy = self.config.get("no_proxy", False)
+        use_krb  = self.config.get("kerberos", {}).get("enabled", False)
         try:
-            data = _yarn_get(base, "nodes", no_proxy=no_proxy)
+            data = _yarn_get(base, "nodes", no_proxy=no_proxy, kerberos=use_krb)
         except IOError as e:
             msg = str(e)
             if is_auto:
@@ -161,12 +181,13 @@ class YarnQueueCheck(CheckBase):
                 message="yarn.rm_url not configured — add yarn.rm_url to config"
             )
         no_proxy = self.config.get("no_proxy", False)
+        use_krb  = self.config.get("kerberos", {}).get("enabled", False)
         yarn_cfg = self.config.get("checks", {}).get("yarn_queues", {})
         warn_pct = float(yarn_cfg.get("usage_warning_pct", 80))
         crit_pct = float(yarn_cfg.get("usage_critical_pct", 90))
 
         try:
-            data = _yarn_get(base, "scheduler", no_proxy=no_proxy)
+            data = _yarn_get(base, "scheduler", no_proxy=no_proxy, kerberos=use_krb)
         except IOError as e:
             msg = str(e)
             if is_auto:

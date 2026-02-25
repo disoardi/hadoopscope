@@ -423,6 +423,7 @@ class HdfsWritabilityCheck(CheckBase):
                 message="webhdfs.url not configured"
             )
 
+        timeout   = int(hdfs_cfg.get("timeout", DEFAULT_TIMEOUT))
         use_krb, keytab, principal = _get_kerberos_cfg(self.config)
         if use_krb:
             try:
@@ -440,8 +441,8 @@ class HdfsWritabilityCheck(CheckBase):
 
             if use_krb:
                 _curl_put_webhdfs(base_url, test_path_ts, self.TEST_FILE_CONTENT,
-                                  no_proxy=no_proxy)
-                _curl_delete_webhdfs(base_url, test_path_ts, no_proxy=no_proxy)
+                                  timeout=timeout, no_proxy=no_proxy)
+                _curl_delete_webhdfs(base_url, test_path_ts, timeout=timeout, no_proxy=no_proxy)
             else:
                 # Simple auth: urllib + gestione redirect 307
                 # WebHDFS CREATE richiede HTTP PUT (non POST) — serve get_method override
