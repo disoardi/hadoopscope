@@ -105,12 +105,19 @@ def run_checks_for_env(env_name, env_config, global_config, caps, args):
     else:
         check_classes = check_registry.get(args.checks, [])
 
+    # Merge sezione globale "checks" in env_config così i check possono
+    # leggere checks.hdfs_writability.test_path, checks.hdfs_space.paths, ecc.
+    # (la sezione "checks" è top-level nel YAML, non dentro l'environment)
+    check_config = dict(env_config)
+    if "checks" in global_config:
+        check_config["checks"] = global_config["checks"]
+
     for CheckClass in check_classes:
-        instance = CheckClass(config=env_config, caps=caps)
+        instance = CheckClass(config=check_config, caps=caps)
 
         if not instance.can_run():
             if instance.fallback is not None:
-                fb_instance = instance.fallback(config=env_config, caps=caps)
+                fb_instance = instance.fallback(config=check_config, caps=caps)
                 if fb_instance.can_run():
                     instance = fb_instance
                 else:
