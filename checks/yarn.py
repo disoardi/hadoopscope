@@ -67,7 +67,13 @@ def _yarn_get(base_url, path, timeout=DEFAULT_TIMEOUT, no_proxy=False, kerberos=
         try:
             out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL,
                                           timeout=timeout + 5)
-            return json.loads(out.decode("utf-8"))
+            body = out.decode("utf-8")
+            try:
+                return json.loads(body)
+            except ValueError:
+                preview = body[:200].replace("\n", " ") if body else "<empty>"
+                raise IOError("YARN: risposta non-JSON da curl (body='{}'): {}".format(
+                    preview, url))
         except subprocess.CalledProcessError as e:
             raise IOError("YARN HTTP error (curl exit {}): {}".format(e.returncode, url))
         except subprocess.TimeoutExpired:
