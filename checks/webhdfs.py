@@ -522,6 +522,9 @@ class HdfsDataNodeCheck(CheckBase):
         use_krb, keytab, principal = _get_kerberos_cfg(self.config)
         ansi_krb, ansi_keytab, ansi_principal = _get_ansible_kerberos_cfg(self.config)
 
+        _debug.log("HdfsDataNodes", "insecure={} via_ansible={} use_krb={}".format(
+            insecure, via_ansible, use_krb))
+
         try:
             if via_ansible:
                 kinit_line    = "kinit -kt {} {}\n".format(ansi_keytab, ansi_principal) \
@@ -621,6 +624,9 @@ class HdfsWritabilityCheck(CheckBase):
         timeout  = int(hdfs_cfg.get("timeout", DEFAULT_TIMEOUT))
         use_krb, keytab, principal = _get_kerberos_cfg(self.config)
         ansi_krb, ansi_keytab, ansi_principal = _get_ansible_kerberos_cfg(self.config)
+
+        _debug.log("HdfsWritability", "insecure={} via_ansible={} use_krb={} timeout={}".format(
+            insecure, via_ansible, use_krb, timeout))
 
         if not via_ansible and use_krb:
             try:
