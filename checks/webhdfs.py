@@ -335,11 +335,22 @@ def _run_ansible_curl(config, shell_script, tag="WebHDFS", timeout=60):
             raise IOError("Ansible WebHDFS failed (rc={}): {}".format(
                 proc.returncode, out[-300:]))
 
-        # Estrae r.stdout dall'output del task debug ansible
+        # Estrae r.stdout dall'output del task debug ansible.
+        # Caso 1: r.stdout è una stringa quotata (stdout testuale)
         m = re.search(r'"r\.stdout":\s*"((?:[^"\\]|\\.)*)"', out)
         if m:
             raw = m.group(1)
             return raw.replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\")
+        # Caso 2: r.stdout è un oggetto/array JSON (Ansible lo ha auto-parsato quando
+        # il comando ha emesso JSON valido).  Riconverti a stringa perché i caller
+        # usano json.loads(stdout).
+        m2 = re.search(r'"r\.stdout":\s*(\{|\[)', out)
+        if m2:
+            try:
+                obj, _ = json.JSONDecoder().raw_decode(out, m2.start(1))
+                return json.dumps(obj)
+            except ValueError:
+                pass
         return out
 
     except subprocess.TimeoutExpired:
@@ -652,10 +663,10 @@ class HdfsWritabilityCheck(CheckBase):
                     base_url.rstrip("/"), test_path_ts)
                 script = (
                     "{kinit}"
-                    "echo 'hadoopscope-probe' | curl -s --fail {ins} --negotiate -u : "
+                    "curl -s --fail {ins} --negotiate -u : "
                     "-X PUT -L --location-trusted "
                     "-H 'Content-Type: application/octet-stream' "
-                    "--data-binary '@-' '{create}'\n"
+                    "--data-binary 'hadoopscope-probe' '{create}'\n"
                     "curl -s --fail {ins} --negotiate -u : -X DELETE '{delete}'"
                 ).format(kinit=kinit_line, ins=insecure_flag,
                          create=create_url, delete=delete_url)
