@@ -60,26 +60,30 @@ def _yarn_get(base_url, path, timeout=DEFAULT_TIMEOUT, no_proxy=False, kerberos=
 
     if kerberos:
         cmd = ["curl", "-s", "--fail", "--max-time", str(timeout),
-               "--negotiate", "-u", ":"]
+               "--negotiate", "-u", ":",
+               "-H", "Accept: application/json"]
         if no_proxy:
             cmd += ["--noproxy", "*"]
         cmd.append(url)
         try:
-            out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL,
+            out = subprocess.check_output(cmd, stderr=subprocess.PIPE,
                                           timeout=timeout + 5)
             body = out.decode("utf-8")
             try:
                 return json.loads(body)
             except ValueError:
                 preview = body[:200].replace("\n", " ") if body else "<empty>"
-                raise IOError("YARN: risposta non-JSON da curl (body='{}'): {}".format(
-                    preview, url))
+                raise IOError("YARN: risposta non-JSON (body='{}'): {}".format(preview, url))
         except subprocess.CalledProcessError as e:
-            raise IOError("YARN HTTP error (curl exit {}): {}".format(e.returncode, url))
+            stderr_out = e.stderr.decode("utf-8", errors="replace")[:200] if e.stderr else ""
+            raise IOError("YARN HTTP error (curl exit {}{}) — {}".format(
+                e.returncode,
+                " stderr='{}'".format(stderr_out.strip()) if stderr_out else "",
+                url))
         except subprocess.TimeoutExpired:
             raise IOError("YARN timeout ({}s) — {}".format(timeout, url))
-        except OSError:
-            raise IOError("curl non trovato nel PATH")
+        except OSError as e:
+            raise IOError("YARN curl OSError: {} — {}".format(str(e), url))
 
     try:
         req = Request(url)
