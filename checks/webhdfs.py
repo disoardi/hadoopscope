@@ -662,12 +662,19 @@ class HdfsWritabilityCheck(CheckBase):
                 delete_url = "{}/webhdfs/v1{}?op=DELETE".format(
                     base_url.rstrip("/"), test_path_ts)
                 script = (
+                    "set -e\n"
                     "{kinit}"
-                    "curl -s --fail {ins} --negotiate -u : "
+                    "PUT_HTTP=$(curl -s {ins} --negotiate -u : "
                     "-X PUT -L --location-trusted "
                     "-H 'Content-Type: application/octet-stream' "
-                    "--data-binary 'hadoopscope-probe' '{create}'\n"
-                    "curl -s --fail {ins} --negotiate -u : -X DELETE '{delete}'"
+                    "--data-binary 'hadoopscope-probe' "
+                    "-w '%{{http_code}}' -o /dev/null '{create}')\n"
+                    "echo \"WebHDFS CREATE HTTP:$PUT_HTTP\"\n"
+                    "[ \"$PUT_HTTP\" -ge 200 ] && [ \"$PUT_HTTP\" -lt 300 ]\n"
+                    "DEL_HTTP=$(curl -s {ins} --negotiate -u : "
+                    "-X DELETE -w '%{{http_code}}' -o /dev/null '{delete}')\n"
+                    "echo \"WebHDFS DELETE HTTP:$DEL_HTTP\"\n"
+                    "[ \"$DEL_HTTP\" -ge 200 ] && [ \"$DEL_HTTP\" -lt 300 ]"
                 ).format(kinit=kinit_line, ins=insecure_flag,
                          create=create_url, delete=delete_url)
                 _run_ansible_curl(self.config, script, tag="HdfsWritability",
