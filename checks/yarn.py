@@ -30,10 +30,14 @@ def _rm_url(config):
     # type: (dict) -> tuple
     """
     Restituisce (url_or_None, is_auto) del YARN Resource Manager.
-    Priorità: config[yarn][rm_url] > costruita da ambari_url:8088 (solo HDP).
+    Priorità: config[yarn][rm_urls][0] > config[yarn][rm_url] > auto-detect da ambari_url (HDP).
+    Con rm_urls la lista viene provata in ordine; il 307 dal standby viene seguito via -L.
     Restituisce (None, True) se non configurabile — il check torna SKIPPED.
     """
     yarn_cfg = config.get("yarn", {})
+    rm_urls = yarn_cfg.get("rm_urls", [])
+    if rm_urls:
+        return rm_urls[0].rstrip("/"), False
     if yarn_cfg.get("rm_url"):
         return yarn_cfg["rm_url"].rstrip("/"), False
 
@@ -59,8 +63,10 @@ def _yarn_get(base_url, path, timeout=DEFAULT_TIMEOUT, no_proxy=False, kerberos=
     url = "{}/ws/v1/cluster/{}".format(base_url, path.lstrip("/"))
 
     if kerberos:
+        # -L segue il 307 redirect standby→active; --location-trusted
+        # propaga il token SPNEGO anche verso il nuovo host (active RM)
         cmd = ["curl", "-s", "--fail", "--max-time", str(timeout),
-               "--negotiate", "-u", ":",
+               "--negotiate", "-u", ":", "-L", "--location-trusted",
                "-H", "Accept: application/json"]
         if no_proxy:
             cmd += ["--noproxy", "*"]
