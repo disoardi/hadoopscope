@@ -263,6 +263,50 @@ alerts:
 
 ---
 
+## 🐛 Known Gotchas (dal campo)
+
+Problemi reali incontrati in produzione — leggili prima di scrivere codice che tocca questi moduli.
+
+### HttpFS — accesso sempre tramite load balancer
+Il keytab HttpFS contiene `HTTP/<LB-hostname>@REALM` ma NON `HTTP/<nodo-diretto>@REALM`.
+Se `webhdfs.url` punta direttamente al nodo (es. `vmgclalpr1615:14000`), la negoziazione
+SPNEGO fallisce con `GSSException: No valid credentials` → HTTP 403.
+**Regola**: `webhdfs.url` deve puntare **sempre al hostname del load balancer HttpFS**.
+
+### Ansible auto-parsa JSON stdout
+Se un comando shell emette JSON valido, Ansible 2.x/3.x renderizza `r.stdout` come
+dict Python (non stringa quotata) nell'output del modulo `debug`. Il regex `"r.stdout": "..."` non trova nulla.
+**Fix**: usare `json.JSONDecoder().raw_decode(out, pos)` come fallback dopo il regex stringa.
+
+### `check_config` deve includere la sezione `checks` globale
+`env_config` contiene solo le chiavi dell'environment (ambari_url, webhdfs, ecc.).
+La sezione `checks:` è top-level nel YAML. Se non è mergiata, `self.config.get("checks", {})`
+restituisce sempre `{}` e tutti i parametri (test_path, paths, ecc.) sono ignorati.
+**Fix** (già in `hadoopscope.py`):
+```python
+check_config = dict(env_config)
+if "checks" in global_config:
+    check_config["checks"] = global_config["checks"]
+```
+**Non rimuovere questo merge senza capire perché esiste.**
+
+### `curl --data-binary '@-'` non funziona su redirect 307
+Leggere il body da stdin (`@-`) funziona solo sulla prima request. Su redirect 307
+(tipico in HDFS: DataNode redirect), lo stdin è già esaurito → body vuoto → HTTP 400/403/500.
+**Fix**: usare sempre literal inline `--data-binary 'contenuto'` nei playbook Ansible.
+
+### Catturare HTTP status code da curl
+Non usare `--fail` (sopprime output utile in debug). Usare invece:
+```bash
+set -e
+HTTP=$(curl -s ... -w '%{http_code}' -o /dev/null 'URL')
+echo "HTTP:$HTTP"
+[ "$HTTP" -ge 200 ] && [ "$HTTP" -lt 300 ]
+```
+Questo mostra il codice HTTP nell'output Ansible e fa fallire lo script se fuori range 2xx.
+
+---
+
 ## 🗓️ Sprint Plan (questo è il task corrente)
 
 ### Giorno 1 — Foundation (parti da qui)
