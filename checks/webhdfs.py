@@ -369,15 +369,53 @@ def _run_ansible_curl(config, shell_script, tag="WebHDFS", timeout=60):
 
 
 # ---------------------------------------------------------------------------
+# Utility
+# ---------------------------------------------------------------------------
+
+def _human(n):
+    # type: (int) -> str
+    """Converte bytes in stringa human-readable (PB/TB/GB/MB/KB/B)."""
+    for unit, threshold in [("PB", 1024**5), ("TB", 1024**4),
+                             ("GB", 1024**3), ("MB", 1024**2), ("KB", 1024)]:
+        if n >= threshold:
+            return "{:.1f} {}".format(n / float(threshold), unit)
+    return "{} B".format(n)
+
+
+_STATUS_RANK = {
+    CheckResult.OK:       0,
+    CheckResult.SKIPPED:  1,
+    CheckResult.UNKNOWN:  2,
+    CheckResult.WARNING:  3,
+    CheckResult.CRITICAL: 4,
+}
+
+
+# ---------------------------------------------------------------------------
 # Check classes
 # ---------------------------------------------------------------------------
 
 class HdfsSpaceCheck(CheckBase):
-    """Controlla utilizzo spazio HDFS per path configurati.
+    """Controlla utilizzo spazio HDFS.
 
-    Simple auth: nessun requisito — usa ?user.name=hdfs
-    Kerberos:    richiede kinit + curl nel PATH
-    via_ansible: esegue curl sull'edge node (utile se WebHDFS non è raggiungibile localmente)
+    1. Capacità globale (sempre se possibile):
+       CapacityUsed / CapacityTotal dal JMX NameNode (FSNamesystemState bean).
+       Richiede webhdfs.namenode_url se webhdfs.url punta a HttpFS (porta 14000/14001).
+
+    2. Quote per path (opzionale):
+       GETCONTENTSUMMARY via WebHDFS/HttpFS — attivo solo se checks.hdfs_space.paths
+       è configurato E i path hanno quota HDFS impostata (spaceQuota > 0).
+       I path senza quota vengono saltati silenziosamente.
+
+    Config:
+      checks:
+        hdfs_space:
+          warning_pct: 80    # soglia WARNING globale (default 75%)
+          critical_pct: 90   # soglia CRITICAL globale (default 90%)
+          paths:             # opzionale — solo per path con quota HDFS configurata
+            - path: /user/etl
+              warning_pct: 85
+              critical_pct: 95
     """
 
     requires = []
@@ -390,7 +428,10 @@ class HdfsSpaceCheck(CheckBase):
         no_proxy    = self.config.get("no_proxy", False)
         insecure    = hdfs_cfg.get("ssl_insecure", False)
         via_ansible = hdfs_cfg.get("via_ansible", False)
-        paths_cfg   = self.config.get("checks", {}).get("hdfs_space", {}).get("paths", [])
+        space_cfg   = self.config.get("checks", {}).get("hdfs_space", {})
+        warn_pct    = float(space_cfg.get("warning_pct", 75))
+        crit_pct    = float(space_cfg.get("critical_pct", 90))
+        paths_cfg   = space_cfg.get("paths", [])
 
         if not base_url:
             return CheckResult(
@@ -398,15 +439,14 @@ class HdfsSpaceCheck(CheckBase):
                 status=CheckResult.UNKNOWN,
                 message="webhdfs.url not configured"
             )
-        if not paths_cfg:
-            return CheckResult(
-                name="HdfsSpace",
-                status=CheckResult.SKIPPED,
-                message="No paths configured — add checks.hdfs_space.paths to config"
-            )
 
-        use_krb, keytab, principal = _get_kerberos_cfg(self.config)
+        use_krb, keytab, principal         = _get_kerberos_cfg(self.config)
         ansi_krb, ansi_keytab, ansi_principal = _get_ansible_kerberos_cfg(self.config)
+        kinit_line    = ("kinit -kt {} {}\n".format(ansi_keytab, ansi_principal)
+                         if (ansi_krb and ansi_keytab and ansi_principal) else "")
+        insecure_flag = "--insecure" if insecure else ""
+
+        # Kinit locale una sola volta (se non via_ansible)
         if not via_ansible and use_krb:
             try:
                 _kinit(keytab, principal)
@@ -417,26 +457,99 @@ class HdfsSpaceCheck(CheckBase):
                     message="Kerberos init failed: {}".format(str(e))
                 )
 
-        issues  = []
-        details = {}
+        # ----------------------------------------------------------------
+        # 1. Capacità globale via JMX NameNode
+        # ----------------------------------------------------------------
+        namenode_url  = hdfs_cfg.get("namenode_url") or base_url
+        is_httpfs     = ":14000" in base_url or ":14001" in base_url
+        global_status = CheckResult.OK  # type: str
+        global_msg    = ""
+        global_details = {}             # type: dict
 
-        for path_cfg in paths_cfg:
-            path     = path_cfg["path"]
-            warn_pct = path_cfg.get("warning_pct", 75)
-            crit_pct = path_cfg.get("critical_pct", 90)
+        if is_httpfs and not hdfs_cfg.get("namenode_url"):
+            global_status = CheckResult.SKIPPED
+            global_msg    = (
+                "Global HDFS capacity unavailable — webhdfs.url points to HttpFS "
+                "(port 14000/14001). Add webhdfs.namenode_url to enable."
+            )
+        else:
+            jmx_base = namenode_url.replace("/webhdfs/v1", "").rstrip("/")
+            jmx_url  = "{}/jmx?qry=Hadoop:service=NameNode,name=FSNamesystemState".format(
+                jmx_base)
             try:
                 if via_ansible:
-                    kinit_line    = "kinit -kt {} {}\n".format(ansi_keytab, ansi_principal) \
-                        if (ansi_krb and ansi_keytab and ansi_principal) else ""
-                    insecure_flag = "--insecure" if insecure else ""
+                    script = "{}curl -s --fail {} --negotiate -u : '{}'".format(
+                        kinit_line, insecure_flag, jmx_url)
+                    stdout = _run_ansible_curl(self.config, script, tag="HdfsSpace/JMX")
+                    data   = json.loads(stdout)
+                elif use_krb:
+                    data = _curl_get_json(jmx_url, negotiate=True,
+                                          no_proxy=no_proxy, insecure=insecure)
+                else:
+                    resp = _open_url(Request(jmx_url), timeout=DEFAULT_TIMEOUT,
+                                     no_proxy=no_proxy)
+                    data = json.loads(resp.read().decode("utf-8"))
+
+                beans     = data.get("beans", [{}])
+                nn        = beans[0] if beans else {}
+                total     = nn.get("CapacityTotal", 0)
+                used      = nn.get("CapacityUsed", 0)
+                remaining = nn.get("CapacityRemaining", 0)
+
+                if total <= 0:
+                    global_status = CheckResult.UNKNOWN
+                    global_msg    = "CapacityTotal=0 in JMX (NameNode not yet initialized?)"
+                else:
+                    pct = (used / float(total)) * 100
+                    global_details = {
+                        "capacity_total_bytes":     total,
+                        "capacity_used_bytes":      used,
+                        "capacity_remaining_bytes": remaining,
+                        "used_pct":                 round(pct, 1),
+                    }
+                    global_msg = "HDFS used: {} / {} ({:.1f}%)".format(
+                        _human(used), _human(total), pct)
+                    if pct >= crit_pct:
+                        global_status = CheckResult.CRITICAL
+                        global_msg += " — CRITICAL (threshold: {:.0f}%)".format(crit_pct)
+                    elif pct >= warn_pct:
+                        global_status = CheckResult.WARNING
+                        global_msg += " — WARNING (threshold: {:.0f}%)".format(warn_pct)
+                    else:
+                        global_status = CheckResult.OK
+
+            except Exception as e:
+                global_status = CheckResult.UNKNOWN
+                global_msg    = "JMX error: {}".format(str(e))
+
+        # Nessun path configurato → ritorna solo risultato globale
+        if not paths_cfg:
+            return CheckResult(
+                name="HdfsSpace",
+                status=global_status,
+                message=global_msg,
+                details=global_details
+            )
+
+        # ----------------------------------------------------------------
+        # 2. Quote per path (opzionale)
+        # ----------------------------------------------------------------
+        quota_issues  = []  # type: list
+        quota_details = {}  # type: dict
+
+        for path_cfg in paths_cfg:
+            path   = path_cfg["path"]
+            p_warn = float(path_cfg.get("warning_pct", 75))
+            p_crit = float(path_cfg.get("critical_pct", 90))
+            try:
+                if via_ansible:
                     url    = "{}/webhdfs/v1{}?op=GETCONTENTSUMMARY".format(
                         base_url.rstrip("/"), path)
                     script = "{}curl -s --fail {} --negotiate -u : '{}'".format(
                         kinit_line, insecure_flag, url)
                     stdout = _run_ansible_curl(
-                        self.config, script,
-                        tag="HdfsSpace[{}]".format(path))
-                    data = json.loads(stdout)
+                        self.config, script, tag="HdfsSpace[{}]".format(path))
+                    data   = json.loads(stdout)
                 else:
                     data = _webhdfs_get(base_url, path, "GETCONTENTSUMMARY",
                                         user, kerberos=use_krb, no_proxy=no_proxy,
@@ -447,44 +560,50 @@ class HdfsSpaceCheck(CheckBase):
                 quota   = summary.get("spaceQuota", -1)
 
                 if quota <= 0:
-                    details[path] = {"used": used, "quota": "none"}
+                    # Nessuna quota HDFS su questo path — skip silenzioso
+                    quota_details[path] = {"used": _human(used), "quota": "none"}
                     continue
 
                 pct = (used / float(quota)) * 100
-                details[path] = {
-                    "used_bytes": used,
+                quota_details[path] = {
+                    "used_bytes":  used,
                     "quota_bytes": quota,
-                    "used_pct": round(pct, 1)
+                    "used_pct":    round(pct, 1),
                 }
-                if pct >= crit_pct:
-                    issues.append((CheckResult.CRITICAL, path, pct, used, quota))
-                elif pct >= warn_pct:
-                    issues.append((CheckResult.WARNING, path, pct, used, quota))
+                if pct >= p_crit:
+                    quota_issues.append((CheckResult.CRITICAL, path, pct))
+                elif pct >= p_warn:
+                    quota_issues.append((CheckResult.WARNING, path, pct))
 
-            except (IOError, ValueError):
-                issues.append((CheckResult.UNKNOWN, path, 0, 0, 0))
+            except Exception as e:
+                quota_issues.append((CheckResult.UNKNOWN, path, 0))
+                quota_details[path] = {"error": str(e)}
 
-        if not issues:
-            return CheckResult(
-                name="HdfsSpace",
-                status=CheckResult.OK,
-                message="All {} paths within thresholds".format(len(paths_cfg)),
-                details=details
+        # Combina risultati globale + quote
+        global_details["path_quotas"] = quota_details
+
+        quota_status = CheckResult.OK
+        quota_part   = ""
+        if quota_issues:
+            quota_status = max(
+                (i[0] for i in quota_issues),
+                key=lambda s: _STATUS_RANK.get(s, 0)
+            )
+            quota_part = " | Quota issues: " + "; ".join(
+                "{}: {:.0f}% ({})".format(i[1], i[2], i[0])
+                for i in quota_issues
             )
 
-        worst  = max(issues, key=lambda x: (
-            0 if x[0] == CheckResult.UNKNOWN else
-            1 if x[0] == CheckResult.WARNING else 2
-        ))
-        status = worst[0]
-        msgs   = ["{}: {:.0f}% ({})".format(
-            i[1], i[2], "CRITICAL" if i[0] == CheckResult.CRITICAL else i[0])
-            for i in issues]
+        final_status = (
+            global_status
+            if _STATUS_RANK.get(global_status, 0) >= _STATUS_RANK.get(quota_status, 0)
+            else quota_status
+        )
         return CheckResult(
             name="HdfsSpace",
-            status=status,
-            message="; ".join(msgs),
-            details=details
+            status=final_status,
+            message=global_msg + quota_part,
+            details=global_details
         )
 
 
