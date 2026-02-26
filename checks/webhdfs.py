@@ -460,36 +460,57 @@ class HdfsSpaceCheck(CheckBase):
         # ----------------------------------------------------------------
         # 1. Capacità globale via JMX NameNode
         # ----------------------------------------------------------------
-        namenode_url  = hdfs_cfg.get("namenode_url") or base_url
+        # namenode_urls (list, HA) > namenode_url (single) > base_url (fallback)
+        _nn_urls_raw = hdfs_cfg.get("namenode_urls") or []
+        if not _nn_urls_raw and hdfs_cfg.get("namenode_url"):
+            _nn_urls_raw = [hdfs_cfg["namenode_url"]]
+        namenode_urls = [u.rstrip("/") for u in _nn_urls_raw] if _nn_urls_raw else None
+
         is_httpfs     = ":14000" in base_url or ":14001" in base_url
         global_status = CheckResult.OK  # type: str
         global_msg    = ""
         global_details = {}             # type: dict
 
-        if is_httpfs and not hdfs_cfg.get("namenode_url"):
+        if is_httpfs and not namenode_urls:
             global_status = CheckResult.SKIPPED
             global_msg    = (
                 "Global HDFS capacity unavailable — webhdfs.url points to HttpFS "
-                "(port 14000/14001). Add webhdfs.namenode_url to enable."
+                "(port 14000/14001). Add webhdfs.namenode_url (or namenode_urls) to enable."
             )
         else:
-            jmx_base = namenode_url.replace("/webhdfs/v1", "").rstrip("/")
-            jmx_url  = "{}/jmx?qry=Hadoop:service=NameNode,name=FSNamesystemState".format(
-                jmx_base)
-            try:
-                if via_ansible:
-                    script = "{}curl -s --fail {} --negotiate -u : '{}'".format(
-                        kinit_line, insecure_flag, jmx_url)
-                    stdout = _run_ansible_curl(self.config, script, tag="HdfsSpace/JMX")
-                    data   = json.loads(stdout)
-                elif use_krb:
-                    data = _curl_get_json(jmx_url, negotiate=True,
-                                          no_proxy=no_proxy, insecure=insecure)
-                else:
-                    resp = _open_url(Request(jmx_url), timeout=DEFAULT_TIMEOUT,
-                                     no_proxy=no_proxy)
-                    data = json.loads(resp.read().decode("utf-8"))
+            if not namenode_urls:
+                namenode_urls = [base_url.rstrip("/")]
 
+            data          = None
+            jmx_errors    = []
+            used_nn_url   = None
+            for nn_url in namenode_urls:
+                jmx_base = nn_url.replace("/webhdfs/v1", "")
+                jmx_url  = "{}/jmx?qry=Hadoop:service=NameNode,name=FSNamesystemState".format(
+                    jmx_base)
+                try:
+                    if via_ansible:
+                        script = "{}curl -s --fail {} --negotiate -u : '{}'".format(
+                            kinit_line, insecure_flag, jmx_url)
+                        stdout = _run_ansible_curl(self.config, script, tag="HdfsSpace/JMX")
+                        data   = json.loads(stdout)
+                    elif use_krb:
+                        data = _curl_get_json(jmx_url, negotiate=True,
+                                              no_proxy=no_proxy, insecure=insecure)
+                    else:
+                        resp = _open_url(Request(jmx_url), timeout=DEFAULT_TIMEOUT,
+                                         no_proxy=no_proxy)
+                        data = json.loads(resp.read().decode("utf-8"))
+                    used_nn_url = nn_url
+                    break  # success — stop trying
+                except Exception as e:
+                    jmx_errors.append("{}: {}".format(nn_url, str(e)))
+
+            if data is None:
+                global_status = CheckResult.UNKNOWN
+                global_msg    = "JMX error (tried {} NN): {}".format(
+                    len(namenode_urls), "; ".join(jmx_errors))
+            else:
                 beans     = data.get("beans", [{}])
                 nn        = beans[0] if beans else {}
                 total     = nn.get("CapacityTotal", 0)
@@ -507,6 +528,8 @@ class HdfsSpaceCheck(CheckBase):
                         "capacity_remaining_bytes": remaining,
                         "used_pct":                 round(pct, 1),
                     }
+                    if len(namenode_urls) > 1:
+                        global_details["namenode_url_used"] = used_nn_url
                     global_msg = "HDFS used: {} / {} ({:.1f}%)".format(
                         _human(used), _human(total), pct)
                     if pct >= crit_pct:
@@ -517,10 +540,6 @@ class HdfsSpaceCheck(CheckBase):
                         global_msg += " — WARNING (threshold: {:.0f}%)".format(warn_pct)
                     else:
                         global_status = CheckResult.OK
-
-            except Exception as e:
-                global_status = CheckResult.UNKNOWN
-                global_msg    = "JMX error: {}".format(str(e))
 
         # Nessun path configurato → ritorna solo risultato globale
         if not paths_cfg:
@@ -633,51 +652,73 @@ class HdfsDataNodeCheck(CheckBase):
                 message="webhdfs.url not configured"
             )
 
-        # JMX endpoint: usa namenode_url se configurato (necessario quando webhdfs.url
-        # punta a HttpFS, porta 14000/14001, che non espone JMX).
-        namenode_url = hdfs_cfg.get("namenode_url") or base_url
-        if not hdfs_cfg.get("namenode_url") and (":14000" in base_url or ":14001" in base_url):
+        # JMX endpoint: namenode_urls (list, HA) > namenode_url (single) > base_url (fallback).
+        # Necessario quando webhdfs.url punta a HttpFS (porta 14000/14001) che non espone JMX.
+        _nn_urls_raw = hdfs_cfg.get("namenode_urls") or []
+        if not _nn_urls_raw and hdfs_cfg.get("namenode_url"):
+            _nn_urls_raw = [hdfs_cfg["namenode_url"]]
+        namenode_urls = [u.rstrip("/") for u in _nn_urls_raw] if _nn_urls_raw else None
+
+        is_httpfs = ":14000" in base_url or ":14001" in base_url
+        if is_httpfs and not namenode_urls:
             return CheckResult(
                 name="HdfsDataNodes",
                 status=CheckResult.SKIPPED,
                 message=(
                     "webhdfs.url points to HttpFS (port 14000/14001) which has no JMX endpoint. "
-                    "Add webhdfs.namenode_url pointing to the NameNode directly "
+                    "Add webhdfs.namenode_url (or namenode_urls) pointing to the NameNode directly "
                     "(e.g. https://namenode.host:9871)"
                 )
             )
-        jmx_base = namenode_url.replace("/webhdfs/v1", "").rstrip("/")
-        jmx_url  = "{}/jmx?qry=Hadoop:service=NameNode,name=FSNamesystemState".format(jmx_base)
+        if not namenode_urls:
+            namenode_urls = [base_url.rstrip("/")]
 
         use_krb, keytab, principal = _get_kerberos_cfg(self.config)
         ansi_krb, ansi_keytab, ansi_principal = _get_ansible_kerberos_cfg(self.config)
 
-        _debug.log("HdfsDataNodes", "insecure={} via_ansible={} use_krb={}".format(
-            insecure, via_ansible, use_krb))
+        _debug.log("HdfsDataNodes", "insecure={} via_ansible={} use_krb={} namenodes={}".format(
+            insecure, via_ansible, use_krb, namenode_urls))
+
+        kinit_line    = "kinit -kt {} {}\n".format(ansi_keytab, ansi_principal) \
+            if (ansi_krb and ansi_keytab and ansi_principal) else ""
+        insecure_flag = "--insecure" if insecure else ""
 
         try:
-            if via_ansible:
-                kinit_line    = "kinit -kt {} {}\n".format(ansi_keytab, ansi_principal) \
-                    if (ansi_krb and ansi_keytab and ansi_principal) else ""
-                insecure_flag = "--insecure" if insecure else ""
-                script = "{}curl -s --fail {} --negotiate -u : '{}'".format(
-                    kinit_line, insecure_flag, jmx_url)
-                stdout = _run_ansible_curl(self.config, script, tag="HdfsDataNodes")
-                data   = json.loads(stdout)
-            elif use_krb:
+            data       = None
+            jmx_errors = []
+            for nn_url in namenode_urls:
+                jmx_base = nn_url.replace("/webhdfs/v1", "")
+                jmx_url  = "{}/jmx?qry=Hadoop:service=NameNode,name=FSNamesystemState".format(
+                    jmx_base)
                 try:
-                    _kinit(keytab, principal)
-                except IOError as e:
-                    return CheckResult(
-                        name="HdfsDataNodes",
-                        status=CheckResult.UNKNOWN,
-                        message="Kerberos init failed: {}".format(str(e))
-                    )
-                data = _curl_get_json(jmx_url, negotiate=True, no_proxy=no_proxy,
-                                      insecure=insecure)
-            else:
-                resp = _open_url(Request(jmx_url), timeout=DEFAULT_TIMEOUT, no_proxy=no_proxy)
-                data = json.loads(resp.read().decode("utf-8"))
+                    if via_ansible:
+                        script = "{}curl -s --fail {} --negotiate -u : '{}'".format(
+                            kinit_line, insecure_flag, jmx_url)
+                        stdout = _run_ansible_curl(self.config, script, tag="HdfsDataNodes")
+                        data   = json.loads(stdout)
+                    elif use_krb:
+                        if data is None:  # kinit only once
+                            try:
+                                _kinit(keytab, principal)
+                            except IOError as e:
+                                return CheckResult(
+                                    name="HdfsDataNodes",
+                                    status=CheckResult.UNKNOWN,
+                                    message="Kerberos init failed: {}".format(str(e))
+                                )
+                        data = _curl_get_json(jmx_url, negotiate=True, no_proxy=no_proxy,
+                                              insecure=insecure)
+                    else:
+                        resp = _open_url(Request(jmx_url), timeout=DEFAULT_TIMEOUT,
+                                         no_proxy=no_proxy)
+                        data = json.loads(resp.read().decode("utf-8"))
+                    break  # success
+                except Exception as e:
+                    jmx_errors.append("{}: {}".format(nn_url, str(e)))
+
+            if data is None:
+                raise IOError("JMX error (tried {} NN): {}".format(
+                    len(namenode_urls), "; ".join(jmx_errors)))
 
             beans    = data.get("beans", [{}])
             nn_state = beans[0] if beans else {}

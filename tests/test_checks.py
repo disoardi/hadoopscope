@@ -638,6 +638,102 @@ def test_hdfs_space_no_paths_jmx_unreachable():
 
 
 # ---------------------------------------------------------------------------
+# Test: namenode_urls HA fallback
+# ---------------------------------------------------------------------------
+
+def test_hdfs_datanode_namenode_urls_first_ok():
+    """namenode_urls: il primo NN risponde → OK."""
+    fixture = load_fixture("jmx_namenode_ok.json")
+    route_map = {"/jmx": fixture}
+    server, port = start_mock_server(route_map)
+
+    config = {
+        "webhdfs": {
+            "url":           "http://127.0.0.1:14000",  # HttpFS — non ha JMX
+            "namenode_urls": [
+                "http://127.0.0.1:{}".format(port),      # NN1 attivo
+                "http://127.0.0.1:19996",                 # NN2 non raggiungibile
+            ],
+            "user": "hdfs",
+        }
+    }
+    try:
+        result = HdfsDataNodeCheck(config, {}).run()
+        assert result.status == CheckResult.OK, "{}: {}".format(result.status, result.message)
+        assert result.details.get("dead") == 0
+    finally:
+        server.shutdown()
+
+
+def test_hdfs_datanode_namenode_urls_fallback_second():
+    """namenode_urls: il primo NN non risponde → fallback al secondo."""
+    fixture = load_fixture("jmx_namenode_ok.json")
+    route_map = {"/jmx": fixture}
+    server, port = start_mock_server(route_map)
+
+    config = {
+        "webhdfs": {
+            "url":           "http://127.0.0.1:14000",  # HttpFS — non ha JMX
+            "namenode_urls": [
+                "http://127.0.0.1:19996",               # NN1 non raggiungibile
+                "http://127.0.0.1:{}".format(port),     # NN2 attivo
+            ],
+            "user": "hdfs",
+        }
+    }
+    try:
+        result = HdfsDataNodeCheck(config, {}).run()
+        assert result.status == CheckResult.OK, \
+            "Expected OK with fallback NN, got {}: {}".format(result.status, result.message)
+        assert result.details.get("dead") == 0
+    finally:
+        server.shutdown()
+
+
+def test_hdfs_datanode_namenode_urls_both_down():
+    """namenode_urls: entrambi i NN non raggiungibili → UNKNOWN con messaggio errore."""
+    config = {
+        "webhdfs": {
+            "url":           "http://127.0.0.1:14000",
+            "namenode_urls": [
+                "http://127.0.0.1:19994",
+                "http://127.0.0.1:19995",
+            ],
+            "user": "hdfs",
+        }
+    }
+    result = HdfsDataNodeCheck(config, {}).run()
+    assert result.status == CheckResult.UNKNOWN, "{}: {}".format(result.status, result.message)
+    assert "2 NN" in result.message or "JMX error" in result.message
+
+
+def test_hdfs_space_namenode_urls_fallback():
+    """HdfsSpace: namenode_urls fallback al secondo NN funzionante."""
+    fixture = load_fixture("jmx_namenode_ok.json")
+    route_map = {"/jmx": fixture}
+    server, port = start_mock_server(route_map)
+
+    config = {
+        "webhdfs": {
+            "url":           "http://127.0.0.1:14000",  # HttpFS — non ha JMX
+            "namenode_urls": [
+                "http://127.0.0.1:19993",               # NN1 non raggiungibile
+                "http://127.0.0.1:{}".format(port),     # NN2 attivo
+            ],
+            "user": "hdfs",
+        }
+    }
+    try:
+        result = HdfsSpaceCheck(config, {}).run()
+        assert result.status in (CheckResult.OK, CheckResult.WARNING, CheckResult.CRITICAL), \
+            "Expected capacity check result, got {}: {}".format(result.status, result.message)
+        assert "HDFS used" in result.message
+        assert result.details.get("namenode_url_used") is not None
+    finally:
+        server.shutdown()
+
+
+# ---------------------------------------------------------------------------
 # Test: YarnNodeHealthCheck
 # ---------------------------------------------------------------------------
 
