@@ -105,7 +105,14 @@ def _yarn_get(base_url, path, timeout=DEFAULT_TIMEOUT, no_proxy=False, kerberos=
 
 
 class YarnNodeHealthCheck(CheckBase):
-    """Controlla lo stato dei nodi YARN — segnala nodi UNHEALTHY o LOST."""
+    """Controlla lo stato dei nodi YARN — segnala nodi UNHEALTHY o LOST.
+
+    Config opzionale:
+        yarn:
+          ignore_states: [LOST, DECOMMISSIONED]   # stati da non conteggiare come errore
+          # Utile quando CM decommissiona i nodi ma YARN-RM li mostra come LOST
+          # perché il NodeManager è stato stoppato senza completare il graceful decommission.
+    """
 
     requires = []  # YARN RM REST, sempre disponibile
 
@@ -120,6 +127,11 @@ class YarnNodeHealthCheck(CheckBase):
             )
         no_proxy = self.config.get("no_proxy", False)
         use_krb  = self.config.get("kerberos", {}).get("enabled", False)
+
+        # Stati da ignorare completamente (non contribuiscono ad alert)
+        yarn_cfg       = self.config.get("yarn", {})
+        ignore_states  = set(s.upper() for s in yarn_cfg.get("ignore_states", []))
+
         try:
             data = _yarn_get(base, "nodes", no_proxy=no_proxy, kerberos=use_krb)
         except IOError as e:
@@ -140,10 +152,16 @@ class YarnNodeHealthCheck(CheckBase):
                 message="No nodes returned by YARN RM (or cluster empty)"
             )
 
-        unhealthy     = [n["id"] for n in nodes if n.get("state") == "UNHEALTHY"]
-        lost          = [n["id"] for n in nodes if n.get("state") == "LOST"]
-        running       = [n["id"] for n in nodes if n.get("state") == "RUNNING"]
-        decommissioned = [n["id"] for n in nodes
+        # Filtra i nodi con stati ignorati prima di classificare
+        active_nodes = [n for n in nodes
+                        if n.get("state", "").upper() not in ignore_states]
+        ignored      = [n["id"] for n in nodes
+                        if n.get("state", "").upper() in ignore_states]
+
+        unhealthy     = [n["id"] for n in active_nodes if n.get("state") == "UNHEALTHY"]
+        lost          = [n["id"] for n in active_nodes if n.get("state") == "LOST"]
+        running       = [n["id"] for n in active_nodes if n.get("state") == "RUNNING"]
+        decommissioned = [n["id"] for n in active_nodes
                           if n.get("state") in ("DECOMMISSIONED", "DECOMMISSIONING",
                                                 "SHUTDOWN", "REBOOTED")]
 
@@ -153,6 +171,7 @@ class YarnNodeHealthCheck(CheckBase):
             "unhealthy": len(unhealthy),
             "lost": len(lost),
             "decommissioned": len(decommissioned),
+            "ignored": len(ignored),
         }
 
         if lost:
@@ -174,6 +193,8 @@ class YarnNodeHealthCheck(CheckBase):
         msg = "{}/{} nodes RUNNING".format(len(running), len(nodes))
         if decommissioned:
             msg += " ({} decommissioned)".format(len(decommissioned))
+        if ignored:
+            msg += " ({} ignored)".format(len(ignored))
         return CheckResult(
             name="YarnNodeHealth",
             status=CheckResult.OK,
