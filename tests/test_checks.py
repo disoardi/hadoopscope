@@ -690,6 +690,80 @@ def test_yarn_connection_error_suggests_rm_url():
         "Auto-detected URL error should suggest yarn.rm_url: {}".format(result.message)
 
 
+def test_yarn_cdp_lost_nodes_autodetect_from_cm():
+    """CDP: nodi LOST corrispondenti a CM-DECOMMISSIONED sono trattati come decommissionati.
+
+    Due server mock:
+      - YARN RM: /ws/v1/cluster/nodes → 2 RUNNING + 2 LOST
+      - CM API: /api/v40/hosts → worker03 DECOMMISSIONED, worker04 DECOMMISSIONED
+    Risultato atteso: OK — 2/4 RUNNING (2 decommissioned), nessun CRITICAL.
+    """
+    from checks.yarn import _cm_decommissioned_hosts
+
+    yarn_fixture = load_fixture("yarn_nodes_lost_decom.json")
+    cm_hosts_fixture = {
+        "items": [
+            {"hostname": "worker01", "commissionState": "COMMISSIONED"},
+            {"hostname": "worker02", "commissionState": "COMMISSIONED"},
+            {"hostname": "worker03", "commissionState": "DECOMMISSIONED"},
+            {"hostname": "worker04", "commissionState": "DECOMMISSIONED"},
+        ]
+    }
+    # Serve entrambi gli endpoint sullo stesso server mock
+    route_map = {
+        "/ws/v1/cluster/nodes": yarn_fixture,
+        "/api/v40/hosts":       cm_hosts_fixture,
+    }
+    server, port = start_mock_server(route_map)
+    base = "http://127.0.0.1:{}".format(port)
+    config = {
+        "yarn":   {"rm_url": base},
+        "cm_url": base,
+        "cm_user": "admin",
+        "cm_pass": "admin",
+    }
+    try:
+        result = YarnNodeHealthCheck(config, {}).run()
+        assert result.status == CheckResult.OK, \
+            "Expected OK with CM auto-detect, got {}: {}".format(
+                result.status, result.message)
+        assert result.details.get("decommissioned") == 2
+        assert "decommissioned" in result.message
+    finally:
+        server.shutdown()
+
+
+def test_yarn_cdp_lost_nodes_without_cm_is_critical():
+    """Senza cm_url, i nodi LOST che non sono in decommissioned_nodes restano CRITICAL."""
+    yarn_fixture = load_fixture("yarn_nodes_lost_decom.json")
+    route_map = {"/ws/v1/cluster/nodes": yarn_fixture}
+    server, port = start_mock_server(route_map)
+    config = {"yarn": {"rm_url": "http://127.0.0.1:{}".format(port)}}
+    try:
+        result = YarnNodeHealthCheck(config, {}).run()
+        assert result.status == CheckResult.CRITICAL, \
+            "Expected CRITICAL without CM config, got {}: {}".format(
+                result.status, result.message)
+    finally:
+        server.shutdown()
+
+
+def test_cm_decommissioned_hosts_no_cm_url():
+    """Senza cm_url nel config, _cm_decommissioned_hosts restituisce set vuoto."""
+    from checks.yarn import _cm_decommissioned_hosts
+    assert _cm_decommissioned_hosts({}) == set()
+    assert _cm_decommissioned_hosts({"yarn": {"rm_url": "http://x"}}) == set()
+
+
+def test_cm_decommissioned_hosts_cm_unreachable():
+    """CM non raggiungibile → set vuoto (fallback silenzioso)."""
+    from checks.yarn import _cm_decommissioned_hosts
+    result = _cm_decommissioned_hosts(
+        {"cm_url": "http://127.0.0.1:19997", "cm_user": "u", "cm_pass": "p"}
+    )
+    assert result == set()
+
+
 # ---------------------------------------------------------------------------
 # Test: ClouderaServiceHealthCheck
 # ---------------------------------------------------------------------------

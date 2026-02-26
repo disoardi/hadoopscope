@@ -26,6 +26,55 @@ DEFAULT_TIMEOUT = 10
 DEFAULT_RM_PORT = 8088
 
 
+def _cm_decommissioned_hosts(config, timeout=DEFAULT_TIMEOUT):
+    # type: (dict, int) -> set
+    """Query Cloudera Manager /api/{version}/hosts for DECOMMISSIONED hosts.
+
+    Returns a set of lowercase hostnames so that YARN nodes that appear as
+    LOST (because CM stopped the NodeManager without a graceful YARN
+    decommission signal) can be automatically recognised as decommissioned —
+    without requiring an explicit yarn.decommissioned_nodes list.
+
+    Returns an empty set if cm_url is absent, CM is unreachable, or any
+    error occurs (always safe to call; failures are silently ignored).
+    """
+    cm_url = config.get("cm_url", "").rstrip("/")
+    if not cm_url:
+        return set()
+
+    cm_user   = config.get("cm_user", "")
+    cm_pass   = config.get("cm_pass", "")
+    cm_api    = config.get("cm_api_version", "v40")
+    url       = "{}/api/{}/hosts".format(cm_url, cm_api)
+
+    try:
+        import base64 as _b64
+        token = _b64.b64encode(
+            "{}:{}".format(cm_user, cm_pass).encode()
+        ).decode()
+        auth = "Basic {}".format(token)
+    except Exception:
+        return set()
+
+    try:
+        req = Request(url)
+        req.add_header("Authorization", auth)
+        req.add_header("Accept", "application/json")
+        resp = urlopen(req, timeout=timeout)
+        data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        # CM unreachable / wrong credentials / SSL error → fall back gracefully
+        return set()
+
+    decom = set()  # type: set
+    for h in data.get("items", []):
+        if h.get("commissionState") == "DECOMMISSIONED":
+            hostname = h.get("hostname", "").lower()
+            if hostname:
+                decom.add(hostname)
+    return decom
+
+
 def _rm_url(config):
     # type: (dict) -> tuple
     """
@@ -139,7 +188,15 @@ class YarnNodeHealthCheck(CheckBase):
         no_proxy  = self.config.get("no_proxy", False)
         use_krb   = self.config.get("kerberos", {}).get("enabled", False)
         yarn_cfg  = self.config.get("yarn", {})
+
+        # Manual list from config (always respected)
         decom_set = set(yarn_cfg.get("decommissioned_nodes", []))
+
+        # Auto-detect from CM for CDP: query /api/v{x}/hosts commissionState
+        # LOST nodes whose hostname matches a CM-DECOMMISSIONED host are treated
+        # as decommissioned — no manual list needed on CDP environments.
+        if self.config.get("cm_url"):
+            decom_set |= _cm_decommissioned_hosts(self.config)
 
         try:
             data = _yarn_get(base, "nodes", no_proxy=no_proxy, kerberos=use_krb)
