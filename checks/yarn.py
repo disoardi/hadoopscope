@@ -109,12 +109,23 @@ class YarnNodeHealthCheck(CheckBase):
 
     Config opzionale:
         yarn:
-          ignore_states: [LOST, DECOMMISSIONED]   # stati da non conteggiare come errore
-          # Utile quando CM decommissiona i nodi ma YARN-RM li mostra come LOST
-          # perché il NodeManager è stato stoppato senza completare il graceful decommission.
+          decommissioned_nodes:         # nodi decommissionati da CM ma che YARN-RM
+            - vmhost1.corp.com          # mostra come LOST invece di DECOMMISSIONED
+            - vmhost2.corp.com          # (NodeManager stoppato da CM senza graceful
+                                        #  YARN decommission signal).
+                                        # Formato: hostname o hostname:porta.
+                                        # LOST in questa lista → trattato come decommissionato (OK).
+                                        # LOST NON in lista → CRITICAL (nodo davvero perso).
     """
 
     requires = []  # YARN RM REST, sempre disponibile
+
+    @staticmethod
+    def _in_decom_set(node_id, decom_set):
+        # type: (str, set) -> bool
+        """Controlla se node_id (hostname:port) è in decom_set (hostname o hostname:port)."""
+        hostname = node_id.split(":")[0] if ":" in node_id else node_id
+        return node_id in decom_set or hostname in decom_set
 
     def run(self):
         # type: () -> CheckResult
@@ -125,12 +136,10 @@ class YarnNodeHealthCheck(CheckBase):
                 status=CheckResult.SKIPPED,
                 message="yarn.rm_url not configured — add yarn.rm_url to config"
             )
-        no_proxy = self.config.get("no_proxy", False)
-        use_krb  = self.config.get("kerberos", {}).get("enabled", False)
-
-        # Stati da ignorare completamente (non contribuiscono ad alert)
-        yarn_cfg       = self.config.get("yarn", {})
-        ignore_states  = set(s.upper() for s in yarn_cfg.get("ignore_states", []))
+        no_proxy  = self.config.get("no_proxy", False)
+        use_krb   = self.config.get("kerberos", {}).get("enabled", False)
+        yarn_cfg  = self.config.get("yarn", {})
+        decom_set = set(yarn_cfg.get("decommissioned_nodes", []))
 
         try:
             data = _yarn_get(base, "nodes", no_proxy=no_proxy, kerberos=use_krb)
@@ -152,33 +161,38 @@ class YarnNodeHealthCheck(CheckBase):
                 message="No nodes returned by YARN RM (or cluster empty)"
             )
 
-        # Filtra i nodi con stati ignorati prima di classificare
-        active_nodes = [n for n in nodes
-                        if n.get("state", "").upper() not in ignore_states]
-        ignored      = [n["id"] for n in nodes
-                        if n.get("state", "").upper() in ignore_states]
+        unhealthy = [n["id"] for n in nodes if n.get("state") == "UNHEALTHY"]
+        running   = [n["id"] for n in nodes if n.get("state") == "RUNNING"]
 
-        unhealthy     = [n["id"] for n in active_nodes if n.get("state") == "UNHEALTHY"]
-        lost          = [n["id"] for n in active_nodes if n.get("state") == "LOST"]
-        running       = [n["id"] for n in active_nodes if n.get("state") == "RUNNING"]
-        decommissioned = [n["id"] for n in active_nodes
-                          if n.get("state") in ("DECOMMISSIONED", "DECOMMISSIONING",
-                                                "SHUTDOWN", "REBOOTED")]
+        # LOST: distingue nodi davvero persi da nodi stoppati da CM (LOST perché
+        # il NodeManager è stato fermato senza graceful YARN decommission)
+        lost_real  = [n["id"] for n in nodes
+                      if n.get("state") == "LOST"
+                      and not self._in_decom_set(n["id"], decom_set)]
+        lost_decom = [n["id"] for n in nodes
+                      if n.get("state") == "LOST"
+                      and self._in_decom_set(n["id"], decom_set)]
+
+        # Nodi che YARN stesso conosce come decommissionati + quelli stoppati da CM
+        decommissioned = ([n["id"] for n in nodes
+                           if n.get("state") in ("DECOMMISSIONED", "DECOMMISSIONING",
+                                                  "SHUTDOWN", "REBOOTED")]
+                          + lost_decom)
 
         details = {
-            "total": len(nodes),
-            "running": len(running),
-            "unhealthy": len(unhealthy),
-            "lost": len(lost),
+            "total":          len(nodes),
+            "running":        len(running),
+            "unhealthy":      len(unhealthy),
+            "lost":           len(lost_real),
             "decommissioned": len(decommissioned),
-            "ignored": len(ignored),
         }
 
-        if lost:
+        if lost_real:
             return CheckResult(
                 name="YarnNodeHealth",
                 status=CheckResult.CRITICAL,
-                message="{} LOST node(s): {}".format(len(lost), ", ".join(lost[:5])),
+                message="{} LOST node(s): {}".format(
+                    len(lost_real), ", ".join(lost_real[:5])),
                 details=details
             )
         if unhealthy:
@@ -193,8 +207,6 @@ class YarnNodeHealthCheck(CheckBase):
         msg = "{}/{} nodes RUNNING".format(len(running), len(nodes))
         if decommissioned:
             msg += " ({} decommissioned)".format(len(decommissioned))
-        if ignored:
-            msg += " ({} ignored)".format(len(ignored))
         return CheckResult(
             name="YarnNodeHealth",
             status=CheckResult.OK,
