@@ -305,6 +305,28 @@ echo "HTTP:$HTTP"
 ```
 Questo mostra il codice HTTP nell'output Ansible e fa fallire lo script se fuori range 2xx.
 
+### `no_proxy` — mai usare `urlopen` diretto nei check
+Ogni modulo con chiamate HTTP (`checks/*.py`) deve avere un proprio helper locale
+(es. `_open_url`, `_cm_open`) che gestisce il flag `no_proxy`:
+```python
+def _my_open(req, timeout, no_proxy=False):
+    if no_proxy:
+        return build_opener(ProxyHandler({})).open(req, timeout=timeout)
+    return urlopen(req, timeout=timeout)
+```
+**Verifica**: `grep -r "urlopen(" checks/` non deve mai restituire chiamate dirette —
+ogni `urlopen` deve essere avvolto nell'helper.
+
+### Crontab manager — formato entry HadoopScope
+Le entry gestite da `_step_crontab_manager` in `cluster_status.py` seguono questo formato:
+```
+# hs: config=/path envs=env1,env2 checks=all
+*/15 * * * * /path/python /path/hadoopscope.py --config ... >> /tmp/log 2>&1
+```
+- Riga marker `# hs:` identifica e separa le entry HS dalle altre
+- Entry **disabilitata**: la riga di comando viene commentata con `# ` (il marker rimane attivo)
+- Parse/format in `_parse_hs_block` / `_format_hs_block`
+
 ---
 
 ## 🗓️ Sprint Plan (questo è il task corrente)
