@@ -34,9 +34,10 @@ Examples:
                    help="Path to config file (default: config/hadoopscope.yaml)")
     p.add_argument("--env", action="append", dest="envs",
                    metavar="ENV", help="Environment to check (can repeat for multi-env)")
-    p.add_argument("--checks", default="all",
+    p.add_argument("--checks", action="append", dest="checks", default=None,
                    choices=["all", "health", "hdfs", "hive", "yarn"],
-                   help="Which checks to run (default: all)")
+                   metavar="CATEGORY",
+                   help="Check category to run: all|health|hdfs|hive|yarn (can repeat, default: all)")
     p.add_argument("--output", default="text",
                    choices=["text", "json"],
                    help="Output format (default: text)")
@@ -104,12 +105,20 @@ def run_checks_for_env(env_name, env_config, global_config, caps, args):
     results = []
     check_registry = build_check_registry(env_config, caps)
 
-    if args.checks == "all":
+    # args.checks è una lista (action=append), default None → ["all"]
+    selected = args.checks if args.checks else ["all"]
+    if "all" in selected:
         check_classes = []
         for classes in check_registry.values():
             check_classes.extend(classes)
     else:
-        check_classes = check_registry.get(args.checks, [])
+        check_classes = []
+        seen = set()  # type: set
+        for cat in selected:
+            for cls in check_registry.get(cat, []):
+                if cls not in seen:
+                    seen.add(cls)
+                    check_classes.append(cls)
 
     # Merge sezione globale "checks" in env_config così i check possono
     # leggere checks.hdfs_writability.test_path, checks.hdfs_space.paths, ecc.
