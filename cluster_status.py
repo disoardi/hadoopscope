@@ -16,7 +16,6 @@ Navigation:
 from __future__ import print_function
 
 import curses
-import datetime
 import glob as _glob
 import os
 import subprocess
@@ -37,69 +36,179 @@ CHECK_CATEGORIES = [
     ("yarn",   "YARN: node health + queue usage"),
 ]
 
-SCHEDULE_OPTIONS = [
-    ("once",     "Run once  (no repeat)"),
-    ("5m",       "Every  5 minutes"),
-    ("15m",      "Every 15 minutes"),
-    ("30m",      "Every 30 minutes"),
-    ("1h",       "Every 1 hour"),
-    ("4h",       "Every 4 hours"),
-    ("daily",    "Daily at HH:MM..."),
-    ("weekdays", "Weekdays  (Mon-Fri) at HH:MM..."),
-    ("custom",   "Custom interval (minutes)..."),
+CRON_PRESETS = [
+    ("*/5 * * * *",  "Every  5 minutes"),
+    ("*/15 * * * *", "Every 15 minutes"),
+    ("*/30 * * * *", "Every 30 minutes"),
+    ("0 * * * *",    "Every 1 hour"),
+    ("0 */4 * * *",  "Every 4 hours"),
+    ("daily",        "Daily at HH:MM..."),
+    ("weekdays",     "Weekdays  (Mon-Fri) at HH:MM..."),
+    ("custom",       "Custom cron expression..."),
 ]
 
-# ── Schedule helpers ──────────────────────────────────────────────────────────
+# ── Crontab manager helpers ───────────────────────────────────────────────────
 
-def _seconds_until_next(sched):
-    # type: (tuple) -> int
-    """Calcola i secondi al prossimo run in base al tipo di schedule.
+_HS_MARKER = "# hs:"   # prefisso per le righe marker HadoopScope nel crontab
 
-    sched = ("interval", minutes)          → fisso N minuti
-    sched = ("daily",    (hour, minute))   → ogni giorno a HH:MM
-    sched = ("weekdays", (hour, minute))   → lunedì-venerdì a HH:MM
+
+def _cron_label(cron_expr):
+    # type: (str) -> str
+    """Converte espressione cron comune in label human-readable."""
+    _fixed = {
+        "*/5 * * * *":  "every 5min",
+        "*/15 * * * *": "every 15min",
+        "*/30 * * * *": "every 30min",
+        "0 * * * *":    "every 1h",
+        "0 */4 * * *":  "every 4h",
+        "0 */6 * * *":  "every 6h",
+        "0 */12 * * *": "every 12h",
+        "@daily":       "daily 00:00",
+        "@hourly":      "every 1h",
+    }
+    if cron_expr in _fixed:
+        return _fixed[cron_expr]
+    parts = cron_expr.split()
+    if len(parts) == 5:
+        try:
+            h = int(parts[1])
+            m = int(parts[0])
+            t = "{:02d}:{:02d}".format(h, m)
+            if parts[2] == "*" and parts[3] == "*":
+                if parts[4] == "*":
+                    return "daily {}".format(t)
+                elif parts[4] == "1-5":
+                    return "weekdays {}".format(t)
+        except ValueError:
+            pass
+    return cron_expr
+
+
+def _default_log_path(entry):
+    # type: (dict) -> str
+    envs = entry.get("envs") or ["hadoopscope"]
+    tag  = envs[0].replace("/", "-").replace(" ", "_")
+    return "/tmp/hadoopscope-{}.log".format(tag)
+
+
+def _crontab_read():
+    # type: () -> tuple
+    """Legge il crontab utente. Ritorna (other_lines, hs_blocks) oppure (None, []).
+
+    other_lines: list di righe non-HadoopScope
+    hs_blocks:   list di dict {marker, cmd_line, enabled}
+    Ritorna (None, []) se il comando crontab non è disponibile.
     """
-    stype, sval = sched
-    if stype == "interval":
-        return max(1, sval * 60)
+    try:
+        out   = subprocess.check_output(["crontab", "-l"],
+                                        stderr=subprocess.DEVNULL)
+        lines = out.decode("utf-8", errors="replace").splitlines()
+    except subprocess.CalledProcessError:
+        lines = []   # nessun crontab: ok
+    except OSError:
+        return None, []   # crontab non disponibile
 
-    hour, minute = sval
-    now      = datetime.datetime.now()
-    next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if next_run <= now:
-        next_run += datetime.timedelta(days=1)
-    if stype == "weekdays":
-        while next_run.weekday() >= 5:   # Sat=5, Sun=6
-            next_run += datetime.timedelta(days=1)
-    return max(1, int((next_run - now).total_seconds()))
+    other_lines = []   # type: list
+    hs_blocks   = []   # type: list
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith(_HS_MARKER):
+            marker   = line
+            i       += 1
+            cmd_line = lines[i] if i < len(lines) else ""
+            enabled  = not cmd_line.startswith("# ")
+            hs_blocks.append({"marker": marker, "cmd_line": cmd_line,
+                               "enabled": enabled})
+        else:
+            other_lines.append(line)
+        i += 1
+    return other_lines, hs_blocks
 
 
-def _next_run_label(sched):
-    # type: (tuple) -> str
-    """Stringa human-readable che descrive quando avverrà il prossimo run."""
-    stype, sval = sched
-    if stype == "interval":
-        m = sval
-        if m >= 60 and m % 60 == 0:
-            return "every {}h".format(m // 60)
-        return "every {}min".format(m)
+def _crontab_write(other_lines, hs_blocks):
+    # type: (list, list) -> tuple
+    """Scrive il crontab via `crontab -`. Ritorna (ok, err_msg)."""
+    lines = list(other_lines)
+    for block in hs_blocks:
+        lines.append(block["marker"])
+        lines.append(block["cmd_line"])
+    # Rimuove trailing blank lines duplicate ma mantiene una riga vuota finale
+    content = "\n".join(lines).rstrip() + "\n"
+    try:
+        proc = subprocess.Popen(["crontab", "-"],
+                                stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        _, err = proc.communicate(content.encode("utf-8"))
+        return proc.returncode == 0, err.decode("utf-8", errors="replace").strip()
+    except OSError as e:
+        return False, str(e)
 
-    hour, minute = sval
-    now      = datetime.datetime.now()
-    next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if next_run <= now:
-        next_run += datetime.timedelta(days=1)
-    if stype == "weekdays":
-        while next_run.weekday() >= 5:
-            next_run += datetime.timedelta(days=1)
 
-    if next_run.date() == now.date():
-        day_str = "today"
-    elif (next_run.date() - now.date()).days == 1:
-        day_str = "tomorrow"
+def _parse_hs_block(block):
+    # type: (dict) -> dict
+    """Parsa un blocco crontab HadoopScope in un dict entry."""
+    marker  = block["marker"]
+    cmd_line = block["cmd_line"]
+    enabled  = block["enabled"]
+    entry    = {"marker_raw": marker, "cmd_line": cmd_line, "enabled": enabled,
+                "config": "", "envs": [], "checks": "all",
+                "cron": "", "log_file": ""}
+
+    meta = marker[len(_HS_MARKER):].strip()
+    for part in meta.split():
+        if "=" in part:
+            k, v = part.split("=", 1)
+            if k == "config":
+                entry["config"] = v
+            elif k == "envs":
+                entry["envs"] = [e for e in v.split(",") if e]
+            elif k == "checks":
+                entry["checks"] = v
+
+    # Estrae cron expression dalla riga comando (prima 5 colonne)
+    actual = cmd_line.lstrip("# ").strip()
+    parts  = actual.split(None, 6)
+    if len(parts) >= 5:
+        entry["cron"] = " ".join(parts[:5])
+    # Log file dopo >>
+    if ">>" in cmd_line:
+        log_part = cmd_line.split(">>", 1)[1].strip().split()[0]
+        entry["log_file"] = log_part
+    return entry
+
+
+def _format_hs_block(entry):
+    # type: (dict) -> tuple
+    """Formatta entry come (marker_line, cmd_line) per il crontab."""
+    envs_str = ",".join(entry.get("envs") or [])
+    marker   = "{} config={} envs={} checks={}".format(
+        _HS_MARKER,
+        entry.get("config", ""),
+        envs_str,
+        entry.get("checks", "all"),
+    )
+
+    python  = sys.executable
+    script  = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "hadoopscope.py")
+    env_args = " ".join("--env {}".format(e) for e in (entry.get("envs") or []))
+    log_file = entry.get("log_file") or _default_log_path(entry)
+
+    cmd = "{python} {script} --config {config} {env_args} --checks {checks} --output text >> {log} 2>&1".format(
+        python=python, script=script,
+        config=entry.get("config", ""),
+        env_args=env_args,
+        checks=entry.get("checks", "all"),
+        log=log_file,
+    )
+    full_cmd = "{} {}".format(entry.get("cron", ""), cmd)
+
+    if entry.get("enabled", True):
+        cmd_line = full_cmd
     else:
-        day_str = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][next_run.weekday()]
-    return "{} at {:02d}:{:02d}".format(day_str, hour, minute)
+        cmd_line = "# " + full_cmd
+    return marker, cmd_line
+
 
 # ── Config discovery ─────────────────────────────────────────────────────────
 
@@ -622,7 +731,7 @@ def _run_checks(stdscr, cmd):
     return ret, answer.startswith("q")
 
 
-# ── Schedule helpers ──────────────────────────────────────────────────────────
+# ── Crontab TUI dialogs ───────────────────────────────────────────────────────
 
 def _ask_time(stdscr, title="Scheduled time"):
     # type: (object, str) -> object
@@ -683,66 +792,108 @@ def _ask_time(stdscr, title="Scheduled time"):
             err_msg = ""
 
 
-def _ask_custom_interval(stdscr):
-    # type: (object) -> int
-    """Overlay dialog: ask user to type a custom repeat interval in minutes.
-
-    Returns the integer value, or 0 if cancelled.
+def _ask_text(stdscr, title, prompt, default="", max_len=80):
+    # type: (object, str, str, str, int) -> object
+    """Overlay: input testo generico (path log, espressione cron custom).
+    Restituisce la stringa inserita oppure None se ESC.
     """
     max_y, max_x = stdscr.getmaxyx()
-    bw = 44
+    bw = min(max_x - 4, 76)
     bh = 6
     bx = max(0, (max_x - bw) // 2)
     by = max(0, (max_y - bh) // 2)
 
-    _draw_box(stdscr, by, bx, bh, bw, "Custom interval")
-    _safe_addstr(stdscr, by + 1, bx + 2, "Enter interval in minutes (1-9999):")
-    _safe_addstr(stdscr, by + 4, bx + 2, "ENTER Confirm   ESC Cancel",
-                 curses.A_DIM)
+    _draw_box(stdscr, by, bx, bh, bw, title)
+    _safe_addstr(stdscr, by + 1, bx + 2, prompt[:bw - 4])
+    _safe_addstr(stdscr, by + 4, bx + 2, "ENTER Confirm   ESC Cancel", curses.A_DIM)
     curses.curs_set(1)
-    buf = []  # type: list
+    buf = list(default)   # type: list
 
     while True:
-        inp = "".join(buf)
+        inp      = "".join(buf)
+        disp_w   = bw - 6
+        display  = inp[-disp_w:] if len(inp) > disp_w else inp
         _safe_addstr(stdscr, by + 2, bx + 2,
-                     "> {:<8}".format(inp), curses.color_pair(_C_SEL) | curses.A_BOLD)
+                     "> {:<{w}}".format(display, w=disp_w),
+                     curses.color_pair(_C_SEL) | curses.A_BOLD)
         try:
-            stdscr.move(by + 2, bx + 4 + len(buf))
+            stdscr.move(by + 2, bx + 4 + min(len(display), disp_w))
         except curses.error:
             pass
         stdscr.refresh()
 
         key = stdscr.getch()
-        if key == 27:                            # ESC → cancel
+        if key == 27:
             curses.curs_set(0)
-            return 0
+            return None
         elif key in (curses.KEY_ENTER, ord('\n'), ord('\r')):
             curses.curs_set(0)
-            if buf:
-                val = int("".join(buf))
-                return val if val > 0 else 0
-            return 0
+            return "".join(buf)
         elif key in (curses.KEY_BACKSPACE, 127, 8):
             if buf:
                 buf.pop()
-        elif ord('0') <= key <= ord('9') and len(buf) < 4:
+        elif 32 <= key <= 126 and len(buf) < max_len:
             buf.append(chr(key))
 
 
-def _step_schedule(stdscr):
-    # type: (object) -> object
-    """STEP 5 / 5 — Choose schedule.
+def _confirm_dialog(stdscr, question):
+    # type: (object, str) -> bool
+    """Dialogo Sì/No. Ritorna True se confermato (Y/ENTER), False altrimenti."""
+    max_y, max_x = stdscr.getmaxyx()
+    bw = min(max_x - 4, 60)
+    bh = 5
+    bx = max(0, (max_x - bw) // 2)
+    by = max(0, (max_y - bh) // 2)
 
-    Returns:
-        -999                       user pressed Q/ESC → go back
-        ("once",     0)            run once (no repeat)
-        ("interval", minutes)      repeat every N minutes
-        ("daily",    (h, m))       every day at HH:MM
-        ("weekdays", (h, m))       Mon-Fri at HH:MM
+    _draw_box(stdscr, by, bx, bh, bw, "Confirm")
+    _safe_addstr(stdscr, by + 1, bx + 2, question[:bw - 4])
+    _safe_addstr(stdscr, by + 3, bx + 2, "Y / ENTER = Yes    N / ESC = No",
+                 curses.A_DIM)
+    stdscr.refresh()
+
+    while True:
+        key = stdscr.getch()
+        if key in (ord('y'), ord('Y'), curses.KEY_ENTER, ord('\n'), ord('\r')):
+            return True
+        if key in (ord('n'), ord('N'), 27):
+            return False
+
+
+def _show_msg(stdscr, msg, attr=None):
+    # type: (object, str, object) -> None
+    """Mostra un messaggio temporaneo centrato. L'utente preme un tasto per chiudere."""
+    if attr is None:
+        attr = curses.A_BOLD
+    max_y, max_x = stdscr.getmaxyx()
+    bw = min(max_x - 4, len(msg) + 6)
+    bh = 3
+    bx = max(0, (max_x - bw) // 2)
+    by = max(0, (max_y - bh) // 2)
+
+    _draw_box(stdscr, by, bx, bh, bw, "")
+    _safe_addstr(stdscr, by + 1, bx + 2, msg[:bw - 4], attr)
+    stdscr.refresh()
+    stdscr.getch()
+
+
+def _dialog_add_edit_schedule(stdscr, entry):
+    # type: (object, dict) -> object
+    """Dialogo add/edit schedule. Restituisce entry aggiornata o None se annullato.
+
+    entry contiene almeno: config, envs (list), checks, cron (può essere ""),
+    log_file (può essere ""), enabled.
     """
-    items   = [(k, label) for k, label in SCHEDULE_OPTIONS]
-    selected = {"once"}   # default: run once
-    cursor   = 0
+    items  = list(CRON_PRESETS)
+    cursor = 0
+
+    # Preseleziona in base al cron esistente
+    cur_cron = entry.get("cron", "")
+    for i, (k, _) in enumerate(items):
+        if k == cur_cron:
+            cursor = i
+            break
+
+    selected = {items[cursor][0]}
 
     while True:
         stdscr.erase()
@@ -751,20 +902,26 @@ def _step_schedule(stdscr):
         bh = len(items) + 4
         bx, by = 2, 3
 
-        _draw_header(stdscr, "  STEP 5 / 5   Schedule")
-        _draw_box(stdscr, by, bx, bh, bw, "Schedule options")
+        is_edit = bool(cur_cron)
+        _draw_header(stdscr, "  STEP 5 / 5   {}".format(
+            "Edit schedule" if is_edit else "Add schedule"))
+
+        env_str  = ", ".join(entry.get("envs") or [])
+        info_str = "  env: {}   checks: {}   config: {}".format(
+            env_str, entry.get("checks", "?"),
+            os.path.basename(entry.get("config", "?")))
+        _safe_addstr(stdscr, 2, 0, info_str[:max_x - 1], curses.A_DIM)
+
+        _draw_box(stdscr, by, bx, bh, bw, "Choose schedule frequency")
         _draw_list(stdscr, items, cursor, selected, by, bx, bh, bw, single=True)
 
-        note = "  Scheduled runs always send email (if configured in YAML)"
-        _safe_addstr(stdscr, by + bh, bx, note, curses.A_DIM)
-
         _draw_footer(stdscr,
-                     " UP/DOWN Navigate   SPACE Select   ENTER Confirm   Q Back")
+                     " UP/DOWN Navigate   SPACE Select   ENTER Confirm   ESC Cancel")
         stdscr.refresh()
 
         key = stdscr.getch()
-        if key in (ord('q'), ord('Q'), 27):
-            return -999
+        if key == 27:
+            return None
         elif key == curses.KEY_UP and cursor > 0:
             cursor -= 1
         elif key == curses.KEY_DOWN and cursor < len(items) - 1:
@@ -773,156 +930,201 @@ def _step_schedule(stdscr):
             selected = {items[cursor][0]}
         elif key in (curses.KEY_ENTER, ord('\n'), ord('\r')):
             sel_key = list(selected)[0]
+            cron_expr = ""
 
-            if sel_key == "once":
-                return ("once", 0)
+            if sel_key in ("*/5 * * * *", "*/15 * * * *", "*/30 * * * *",
+                           "0 * * * *", "0 */4 * * *"):
+                cron_expr = sel_key
 
-            _INTERVAL_MAP = {"5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240}
-            if sel_key in _INTERVAL_MAP:
-                return ("interval", _INTERVAL_MAP[sel_key])
-
-            if sel_key == "custom":
-                minutes = _ask_custom_interval(stdscr)
-                if minutes == 0:
-                    continue   # cancelled
-                return ("interval", minutes)
-
-            if sel_key in ("daily", "weekdays"):
-                title = "Daily time" if sel_key == "daily" else "Weekday time (Mon-Fri)"
-                hm = _ask_time(stdscr, title)
+            elif sel_key == "daily":
+                hm = _ask_time(stdscr, "Daily — enter time")
                 if hm is None:
-                    continue   # cancelled
-                return (sel_key, hm)
+                    continue
+                cron_expr = "{} {} * * *".format(hm[1], hm[0])
+
+            elif sel_key == "weekdays":
+                hm = _ask_time(stdscr, "Weekdays (Mon-Fri) — enter time")
+                if hm is None:
+                    continue
+                cron_expr = "{} {} * * 1-5".format(hm[1], hm[0])
+
+            elif sel_key == "custom":
+                default_cron = cur_cron if cur_cron else "0 6 * * *"
+                result = _ask_text(stdscr, "Custom cron expression",
+                                   "Enter 5-field cron expression:", default_cron)
+                if result is None:
+                    continue
+                cron_expr = result.strip()
+
+            if not cron_expr:
+                continue
+
+            # Chiedi log file
+            default_log = entry.get("log_file") or _default_log_path(entry)
+            log_file = _ask_text(stdscr, "Log file",
+                                 "Output log file (stdout + stderr):", default_log)
+            if log_file is None:
+                continue
+
+            new_entry = dict(entry)
+            new_entry["cron"]     = cron_expr
+            new_entry["log_file"] = log_file or _default_log_path(entry)
+            new_entry["enabled"]  = entry.get("enabled", True)
+            return new_entry
 
 
-def _countdown_screen(stdscr, interval_secs, last_exit, run_count, last_run_time,
-                      sched_label=""):
-    # type: (object, int, int, int, str, str) -> bool
-    """Show a curses countdown between scheduled runs.
+def _step_crontab_manager(stdscr, config_path, envs, checks, options):
+    # type: (object, str, list, list, dict) -> object
+    """STEP 5 / 5 — Gestione schedule crontab HadoopScope.
 
-    Returns True when it is time to run again, False if the user quits.
-    Keys: R = run now,  Q/ESC = quit scheduled mode.
-    sched_label: stringa descrittiva del tipo di schedule (es. "daily at 06:00").
+    Mostra le voci HadoopScope presenti nel crontab utente.
+    Operazioni: R Run once, A Add, ENTER Edit, T Toggle, D Delete, Q Back.
+
+    Ritorna:
+        None         → torna allo step 4
+        "run_once"   → esegui i check una volta adesso
     """
-    end_time = time.time() + interval_secs
-    stdscr.timeout(500)               # non-blocking getch (500 ms tick)
-    try:
-        while True:
-            remaining = max(0, int(end_time - time.time()))
-
-            stdscr.erase()
-            max_y, max_x = stdscr.getmaxyx()
-
-            header_info = sched_label if sched_label else "next in {}s".format(remaining)
-            _draw_header(stdscr,
-                         "  Scheduled — run #{} done   {}".format(
-                             run_count, header_info))
-
-            cy = max(4, max_y // 2)
-            status_label = {0: "OK", 1: "WARNING", 2: "CRITICAL"}.get(
-                last_exit, "exit {}".format(last_exit))
-            color_id = {0: _C_OK, 1: _C_WARN, 2: _C_CRIT}.get(last_exit, _C_DIM)
-
-            _safe_addstr(stdscr, cy - 2, 4,
-                         "Run #{} result  : {}".format(run_count, status_label),
-                         curses.color_pair(color_id) | curses.A_BOLD)
-            _safe_addstr(stdscr, cy - 1, 4,
-                         "Completed at   : {}".format(last_run_time),
-                         curses.A_DIM)
-            if sched_label:
-                _safe_addstr(stdscr, cy, 4,
-                             "Schedule       : {}".format(sched_label),
-                             curses.A_DIM)
-
-            # Progress bar
-            bar_w = min(max_x - 26, 40)
-            if interval_secs > 0:
-                pct = remaining / float(interval_secs)
-            else:
-                pct = 0.0
-            filled  = int(bar_w * pct)
-            bar     = "[" + "=" * filled + " " * (bar_w - filled) + "]"
-            mins, secs = divmod(remaining, 60)
-            hours, mins = divmod(mins, 60)
-            if hours:
-                time_str = "{:02d}:{:02d}:{:02d}".format(hours, mins, secs)
-            else:
-                time_str = "{:02d}:{:02d}".format(mins, secs)
-            _safe_addstr(stdscr, cy + 2, 4,
-                         "Next run in    : {}  {}".format(time_str, bar))
-
-            _draw_footer(stdscr,
-                         " R = Run now   Q = Quit scheduled mode")
-            stdscr.refresh()
-
-            if remaining <= 0:
-                return True
-
-            key = stdscr.getch()         # returns -1 after 500 ms timeout
-            if key in (ord('q'), ord('Q'), 27):
-                return False
-            elif key in (ord('r'), ord('R')):
-                return True
-    finally:
-        stdscr.timeout(-1)              # restore blocking input
-
-
-def _run_scheduled(stdscr, cmd, sched):
-    # type: (object, list, tuple) -> None
-    """Run checks su schedule finché l'utente esce dal countdown screen.
-
-    sched = ("interval", minutes) | ("daily", (h,m)) | ("weekdays", (h,m))
-
-    Per schedule time-based (daily/weekdays) il tempo di attesa viene
-    ricalcolato ad ogni iterazione: se il run impiega più del previsto,
-    il countdown parte già calibrato per il prossimo slot corretto.
-    """
-    run_count = 0
+    cursor  = 0
+    msg     = ""   # messaggio di stato (es. "Saved", errore crontab)
 
     while True:
-        run_count += 1
+        other_lines, hs_blocks = _crontab_read()
+        crontab_ok = other_lines is not None
 
-        # Calcola label statica (es. "daily at 06:00") PRIMA del run
-        sched_label = _next_run_label(sched)
+        if not crontab_ok:
+            hs_blocks = []
 
-        # Suspend curses — show live output on terminal
-        curses.endwin()
-        sep = "=" * 68
-        print("\n" + sep)
-        print("  HadoopScope — Scheduled Run #{}  ({})".format(
-            run_count, sched_label))
-        print("  Command: {}".format(" ".join(cmd)))
-        print(sep + "\n")
-        sys.stdout.flush()
+        entries = [_parse_hs_block(b) for b in hs_blocks]
+        if cursor >= len(entries):
+            cursor = max(0, len(entries) - 1)
 
-        try:
-            ret = subprocess.call(cmd)
-        except KeyboardInterrupt:
-            print("\n[interrupted — exiting scheduled mode]")
-            sys.stdout.flush()
-            stdscr.refresh()
-            break
+        # ── Render ───────────────────────────────────────────────────────────
+        stdscr.erase()
+        max_y, max_x = stdscr.getmaxyx()
+        bw = min(max_x - 4, 82)
+        bx = 2
 
-        last_run_time = time.strftime("%H:%M:%S")
-        status_label  = {0: "OK", 1: "WARNING", 2: "CRITICAL"}.get(ret, str(ret))
+        env_str  = ", ".join(envs)  if envs   else "—"
+        chk_str  = ", ".join(checks) if checks else "all"
+        cfg_str  = os.path.basename(config_path or "?")
 
-        # Ricalcola il tempo fino al prossimo slot DOPO il run
-        interval_secs = _seconds_until_next(sched)
-        next_label    = _next_run_label(sched)
+        _draw_header(stdscr, "  STEP 5 / 5   Scheduled Tasks")
+        _safe_addstr(stdscr, 2, bx,
+                     "Selection: env={}  checks={}  config={}".format(
+                         env_str, chk_str, cfg_str),
+                     curses.A_DIM)
 
-        print("\n" + sep)
-        print("  Exit: {}  ({})   Next run: {}".format(
-            ret, status_label, next_label))
-        print(sep + "\n")
-        sys.stdout.flush()
+        # Avviso se crontab non disponibile
+        if not crontab_ok:
+            _safe_addstr(stdscr, 4, bx,
+                         "  WARNING: 'crontab' command not available on this system.",
+                         curses.color_pair(_C_WARN) | curses.A_BOLD)
+        else:
+            by  = 4
+            bh  = max(len(entries), 1) + 4
 
-        # Resume curses for countdown screen
+            _draw_box(stdscr, by, bx, bh, bw,
+                      "HadoopScope cron entries  ({} found)".format(len(entries)))
+
+            if not entries:
+                _safe_addstr(stdscr, by + 1, bx + 3,
+                             "No scheduled tasks. Press A to add one.",
+                             curses.A_DIM)
+            else:
+                # Header colonne
+                _safe_addstr(stdscr, by + 1, bx + 3,
+                             "{:<3} {:<18} {:<8} {:<17} {}".format(
+                                 "", "ENV(s)", "CHECKS", "CRON", "SCHEDULE"),
+                             curses.A_DIM)
+                for i, e in enumerate(entries):
+                    y        = by + 2 + i
+                    enabled  = e.get("enabled", True)
+                    marker   = "►" if i == cursor else " "
+                    tick     = "[✓]" if enabled else "[✗]"
+                    env_col  = ",".join(e.get("envs") or ["?"])[:17]
+                    chk_col  = (e.get("checks") or "all")[:7]
+                    cron_col = (e.get("cron") or "?")[:16]
+                    lbl_col  = _cron_label(e.get("cron") or "")[:18]
+                    line     = "{} {} {:<18} {:<8} {:<17} {}".format(
+                        marker, tick, env_col, chk_col, cron_col, lbl_col)
+                    if not enabled:
+                        line += "  [OFF]"
+                    attr = (curses.A_REVERSE if i == cursor
+                            else (curses.A_DIM if not enabled else curses.A_NORMAL))
+                    _safe_addstr(stdscr, y, bx + 1, line[:bw - 2], attr)
+
+            if msg:
+                _safe_addstr(stdscr, by + bh + 1, bx + 2, msg,
+                             curses.color_pair(_C_OK) | curses.A_BOLD)
+
+        _draw_footer(stdscr,
+                     " R Run once   A Add   ENTER Edit   T Toggle   D Delete   Q Back")
         stdscr.refresh()
-        keep_going = _countdown_screen(
-            stdscr, interval_secs, ret, run_count, last_run_time,
-            sched_label=next_label)
-        if not keep_going:
-            break
+        msg = ""
+
+        # ── Key handling ─────────────────────────────────────────────────────
+        key = stdscr.getch()
+
+        if key in (ord('q'), ord('Q'), 27):
+            return None
+
+        elif key in (ord('r'), ord('R')):
+            return "run_once"
+
+        elif key == curses.KEY_UP and cursor > 0:
+            cursor -= 1
+
+        elif key == curses.KEY_DOWN and cursor < len(entries) - 1:
+            cursor += 1
+
+        elif key in (ord('a'), ord('A')) and crontab_ok:
+            checks_str = ",".join(checks) if isinstance(checks, list) else (checks or "all")
+            new_entry = {
+                "config":   config_path or "",
+                "envs":     list(envs) if envs else [],
+                "checks":   checks_str,
+                "cron":     "",
+                "log_file": "",
+                "enabled":  True,
+            }
+            result = _dialog_add_edit_schedule(stdscr, new_entry)
+            if result is not None:
+                marker_line, cmd_line = _format_hs_block(result)
+                hs_blocks.append({"marker": marker_line, "cmd_line": cmd_line,
+                                  "enabled": result["enabled"]})
+                ok, err = _crontab_write(other_lines, hs_blocks)
+                msg = "Schedule added." if ok else "crontab error: {}".format(err[:50])
+                cursor = len(hs_blocks) - 1
+
+        elif key in (curses.KEY_ENTER, ord('\n'), ord('\r')) and entries and crontab_ok:
+            entry  = entries[cursor]
+            result = _dialog_add_edit_schedule(stdscr, entry)
+            if result is not None:
+                marker_line, cmd_line = _format_hs_block(result)
+                hs_blocks[cursor] = {"marker": marker_line, "cmd_line": cmd_line,
+                                     "enabled": result["enabled"]}
+                ok, err = _crontab_write(other_lines, hs_blocks)
+                msg = "Schedule updated." if ok else "crontab error: {}".format(err[:50])
+
+        elif key in (ord('t'), ord('T')) and entries and crontab_ok:
+            block   = hs_blocks[cursor]
+            enabled = block.get("enabled", True)
+            if enabled:
+                block["cmd_line"] = "# " + block["cmd_line"]
+                block["enabled"]  = False
+            else:
+                block["cmd_line"] = block["cmd_line"].lstrip("# ")
+                block["enabled"]  = True
+            ok, err = _crontab_write(other_lines, hs_blocks)
+            msg = ("Disabled." if enabled else "Enabled.") if ok \
+                  else "crontab error: {}".format(err[:50])
+
+        elif key in (ord('d'), ord('D'), curses.KEY_DC) and entries and crontab_ok:
+            if _confirm_dialog(stdscr, "Delete this scheduled task?"):
+                hs_blocks.pop(cursor)
+                cursor = max(0, min(cursor, len(hs_blocks) - 1))
+                ok, err = _crontab_write(other_lines, hs_blocks)
+                msg = "Deleted." if ok else "crontab error: {}".format(err[:50])
 
 
 # ── Main TUI loop ─────────────────────────────────────────────────────────────
@@ -998,27 +1200,20 @@ def _tui_main(stdscr):
             options = result
             step = 5
 
-        # ── Step 5: schedule ─────────────────────────────────────────────────
+        # ── Step 5: crontab manager ──────────────────────────────────────────
         elif step == 5:
-            sched = _step_schedule(stdscr)
-            if sched == -999:
+            result = _step_crontab_manager(stdscr, config_path, envs,
+                                           checks, options)
+            if result is None:
                 step = 4                     # back
                 continue
-
-            if sched[0] == "once":
-                # Run once — manual mode, respect send_email toggle
+            if result == "run_once":
                 cmd = _build_cmd(config_path, envs, checks, options,
                                  force_email=False)
                 _ret, quit_after = _run_checks(stdscr, cmd)
                 if quit_after:
                     break
-                step = 1                     # loop: start a new run
-            else:
-                # Scheduled mode — email always forced on
-                cmd = _build_cmd(config_path, envs, checks, options,
-                                 force_email=True)
-                _run_scheduled(stdscr, cmd, sched)
-                step = 1                     # return to start after user quits
+            step = 1                         # return to start
 
 
 def main():
