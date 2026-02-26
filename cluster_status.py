@@ -103,7 +103,7 @@ def load_env_names(config_path):
                     if in_envs:
                         m = re.match(r'^  ([\w][\w.-]*)\s*:', line)
                         if m and m.group(1) not in ("type", "enabled", "ambari_url",
-                                                     "cm_url", "webhdfs", "kerberos",
+                                                     "cm_url", "hdfs", "webhdfs", "kerberos",
                                                      "yarn", "ansible", "hive"):
                             envs.append(m.group(1))
                         elif re.match(r'^\S', line):

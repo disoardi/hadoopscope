@@ -199,6 +199,14 @@ def _webhdfs_get(base_url, path, op, user, extra_params="",
         raise IOError("WebHDFS timeout ({}s)".format(timeout))
 
 
+def _hdfs_cfg(config):
+    # type: (dict) -> dict
+    """Legge la sezione HDFS dal config accettando sia 'hdfs:' che 'webhdfs:'.
+    'hdfs:' ha la precedenza; 'webhdfs:' è l'alias legacy retrocompatibile.
+    """
+    return config.get("hdfs") or config.get("webhdfs") or {}
+
+
 def _get_kerberos_cfg(config):
     # type: (dict) -> tuple
     """Legge la configurazione Kerberos locale. Restituisce (enabled, keytab, principal).
@@ -220,7 +228,7 @@ def _get_ansible_kerberos_cfg(config):
     Usare quando il keytab sull'edge node è in un path diverso da kerberos.keytab.
     Se webhdfs.kerberos non è configurato, usa kerberos.keytab (top-level).
     """
-    whdfs_krb = config.get("webhdfs", {}).get("kerberos", {})
+    whdfs_krb = _hdfs_cfg(config).get("kerberos", {})
     if whdfs_krb.get("keytab"):
         use_krb   = config.get("kerberos", {}).get("enabled", True)
         keytab    = whdfs_krb["keytab"]
@@ -422,7 +430,7 @@ class HdfsSpaceCheck(CheckBase):
 
     def run(self):
         # type: () -> CheckResult
-        hdfs_cfg    = self.config.get("webhdfs", {})
+        hdfs_cfg    = _hdfs_cfg(self.config)
         base_url    = hdfs_cfg.get("url", "")
         user        = hdfs_cfg.get("user", "hdfs")
         no_proxy    = self.config.get("no_proxy", False)
@@ -639,7 +647,7 @@ class HdfsDataNodeCheck(CheckBase):
 
     def run(self):
         # type: () -> CheckResult
-        hdfs_cfg    = self.config.get("webhdfs", {})
+        hdfs_cfg    = _hdfs_cfg(self.config)
         base_url    = hdfs_cfg.get("url", "")
         no_proxy    = self.config.get("no_proxy", False)
         insecure    = hdfs_cfg.get("ssl_insecure", False)
@@ -776,7 +784,7 @@ class HdfsWritabilityCheck(CheckBase):
 
     def run(self):
         # type: () -> CheckResult
-        hdfs_cfg    = self.config.get("webhdfs", {})
+        hdfs_cfg    = _hdfs_cfg(self.config)
         base_url    = hdfs_cfg.get("url", "")
         user        = hdfs_cfg.get("user", "hdfs")
         no_proxy    = self.config.get("no_proxy", False)
