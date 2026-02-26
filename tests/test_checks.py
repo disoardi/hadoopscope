@@ -622,16 +622,19 @@ def test_hdfs_datanode_no_url():
     assert "not configured" in result.message
 
 
-def test_hdfs_space_no_paths_skipped():
-    """HdfsSpace senza paths configurati deve restituire SKIPPED con hint."""
+def test_hdfs_space_no_paths_jmx_unreachable():
+    """HdfsSpace senza paths: tenta JMX per capacità globale.
+    Se il NameNode non è raggiungibile restituisce UNKNOWN (non SKIPPED),
+    perché il refactor f359485 fa sempre il check JMX, paths è opzionale.
+    """
     config = {
         "webhdfs": {"url": "http://127.0.0.1:19997", "user": "hdfs"},
-        # checks.hdfs_space.paths assente
+        # checks.hdfs_space.paths assente — check ritorna solo risultato JMX
     }
     result = HdfsSpaceCheck(config, {}).run()
-    assert result.status == CheckResult.SKIPPED, \
-        "No paths should be SKIPPED: {}: {}".format(result.status, result.message)
-    assert "hdfs_space.paths" in result.message
+    assert result.status == CheckResult.UNKNOWN, \
+        "JMX unreachable should give UNKNOWN: {}: {}".format(result.status, result.message)
+    assert "JMX error" in result.message or "jmx" in result.message.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -1068,7 +1071,7 @@ if __name__ == "__main__":
         test_hdfs_datanode_ok,
         test_hdfs_datanode_critical,
         test_hdfs_datanode_no_url,
-        test_hdfs_space_no_paths_skipped,
+        test_hdfs_space_no_paths_jmx_unreachable,
         test_yarn_nodes_ok,
         test_yarn_nodes_unhealthy,
         test_yarn_nodes_connection_error,
