@@ -36,6 +36,12 @@ def _html_esc(s):
             .replace(">", "&gt;"))
 
 
+def _html_msg(s):
+    # type: (str) -> str
+    """HTML-escape and convert newlines to <br> for multi-line messages."""
+    return _html_esc(s).replace("\n", "<br>")
+
+
 def _build_html_body(results, env_name, timestamp):
     # type: (list, str, str) -> str
     """Build an HTML email body following the cluster health report layout."""
@@ -110,13 +116,16 @@ def _build_html_body(results, env_name, timestamp):
         rows_html += (
             '<tr style="background:' + row_bg + ';">'
             '<td style="padding:8px 12px;border-bottom:1px solid #eeeeee;'
-            'font-size:13px;">' + _html_esc(r.name) + '</td>'
+            'font-size:13px;word-wrap:break-word;overflow-wrap:break-word;">'
+            + _html_esc(r.name) + '</td>'
             '<td style="padding:8px 12px;border-bottom:1px solid #eeeeee;">'
             '<span style="display:inline-block;padding:3px 9px;border-radius:3px;'
             'font-size:11px;font-weight:bold;' + bstyle + '">'
             + _html_esc(r.status) + '</span></td>'
             '<td style="padding:8px 12px;border-bottom:1px solid #eeeeee;'
-            'font-size:13px;color:#555555;">' + _html_esc(r.message) + '</td>'
+            'font-size:13px;color:#555555;'
+            'word-wrap:break-word;overflow-wrap:break-word;">'
+            + _html_msg(r.message) + '</td>'
             '</tr>'
         )
 
@@ -129,11 +138,11 @@ def _build_html_body(results, env_name, timestamp):
             + str(len(issue_results)) + ' check(s) require attention'
             '</h2>'
             '<table width="100%" cellspacing="0" cellpadding="0" '
-            'style="border-collapse:collapse;">'
+            'style="border-collapse:collapse;table-layout:fixed;">'
             '<tr style="background:#2a6496;color:#ffffff;font-size:12px;">'
             '<td style="padding:8px 12px;width:28%;font-weight:bold;">CHECK</td>'
             '<td style="padding:8px 12px;width:16%;font-weight:bold;">SEVERITY</td>'
-            '<td style="padding:8px 12px;font-weight:bold;">MESSAGE</td>'
+            '<td style="padding:8px 12px;width:56%;font-weight:bold;">MESSAGE</td>'
             '</tr>'
             + rows_html +
             '</table></td></tr>'
