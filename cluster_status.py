@@ -20,6 +20,7 @@ import glob as _glob
 import os
 import subprocess
 import sys
+import time
 
 # Aggiungiamo la directory del progetto al path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -33,6 +34,16 @@ CHECK_CATEGORIES = [
     ("hdfs",   "HDFS: space, DataNodes, writability"),
     ("hive",   "HiveServer2 connectivity"),
     ("yarn",   "YARN: node health + queue usage"),
+]
+
+SCHEDULE_OPTIONS = [
+    (0,   "Run once  (no repeat)"),
+    (5,   "Every  5 minutes"),
+    (15,  "Every 15 minutes"),
+    (30,  "Every 30 minutes"),
+    (60,  "Every 1 hour"),
+    (240, "Every 4 hours"),
+    (-1,  "Custom interval..."),
 ]
 
 # ── Config discovery ─────────────────────────────────────────────────────────
@@ -269,7 +280,7 @@ def _step_config(stdscr, config_files):
         bh = min(len(items) + 4, max_y - 6)
         bx, by = 2, 3
 
-        _draw_header(stdscr, "  STEP 1 / 4   Select config file")
+        _draw_header(stdscr, "  STEP 1 / 5   Select config file")
         _draw_box(stdscr, by, bx, bh, bw, "Config files")
         _draw_list(stdscr, items, cursor, selected, by, bx, bh, bw, single=True)
 
@@ -310,7 +321,7 @@ def _step_envs(stdscr, env_names, config_label):
         bx, by = 2, 3
 
         _draw_header(stdscr,
-                     "  STEP 2 / 4   Select environments  (config: {})".format(
+                     "  STEP 2 / 5   Select environments  (config: {})".format(
                          os.path.basename(config_label)))
         _draw_box(stdscr, by, bx, bh, bw, "Environments")
         _draw_list(stdscr, items, cursor, selected, by, bx, bh, bw)
@@ -358,7 +369,7 @@ def _step_checks(stdscr):
         bh = len(items) + 4
         bx, by = 2, 3
 
-        _draw_header(stdscr, "  STEP 3 / 4   Select check categories")
+        _draw_header(stdscr, "  STEP 3 / 5   Select check categories")
         _draw_box(stdscr, by, bx, bh, bw, "Check categories")
         _draw_list(stdscr, items, cursor, selected, by, bx, bh, bw)
 
@@ -397,14 +408,16 @@ def _step_checks(stdscr):
 
 def _step_confirm(stdscr, config_path, envs, checks):
     """
-    STEP 4 — Options + confirm.
+    STEP 4 / 5 — Options.
 
-    Returns (options_dict, run) or None to go back.
+    Returns options_dict or None to go back.
+    Email default is OFF for manual runs; scheduled mode will force it on.
     """
-    options = {"dry_run": False, "debug": False}
+    options = {"dry_run": False, "debug": False, "send_email": False}
     opt_items = [
-        ("dry_run", "Dry-run  (validate config, no actual checks)"),
-        ("debug",   "Debug    (verbose stderr output)"),
+        ("dry_run",    "Dry-run     (validate config, no actual checks)"),
+        ("debug",      "Debug       (verbose stderr output)"),
+        ("send_email", "Send email  (dispatch email alert — default OFF for manual runs)"),
     ]
     cursor = 0
 
@@ -414,7 +427,7 @@ def _step_confirm(stdscr, config_path, envs, checks):
         bw = min(max_x - 4, 74)
         bx = 2
 
-        _draw_header(stdscr, "  STEP 4 / 4   Options & confirm")
+        _draw_header(stdscr, "  STEP 4 / 5   Options")
 
         # ── Summary box ──
         by = 3
@@ -451,15 +464,15 @@ def _step_confirm(stdscr, config_path, envs, checks):
             _safe_addstr(stdscr, oy + 1 + i, bx + 2,
                          " {:<{w}} ".format(line, w=bw - 6), attr)
 
-        # ── Run button ──
+        # ── Next button ──
         ry = oy + oh + 1
-        btn = "  [  ENTER  ]  Run checks   [D]  Dry-run shortcut   [Q]  Back  "
+        btn = "  [  ENTER  ]  Next: Schedule   [D]  Dry-run shortcut   [Q]  Back  "
         _safe_addstr(stdscr, ry, bx,
                      "{:<{w}}".format(btn, w=bw),
                      curses.color_pair(_C_OK) | curses.A_BOLD)
 
         _draw_footer(stdscr,
-                     " UP/DOWN Navigate   SPACE Toggle option   ENTER Run   Q Back")
+                     " UP/DOWN Navigate   SPACE Toggle option   ENTER Next   Q Back")
         stdscr.refresh()
 
         key = stdscr.getch()
@@ -481,8 +494,12 @@ def _step_confirm(stdscr, config_path, envs, checks):
 
 # ── Command builder & runner ──────────────────────────────────────────────────
 
-def _build_cmd(config_path, envs, checks, options):
-    # type: (str, list, list, dict) -> list
+def _build_cmd(config_path, envs, checks, options, force_email=False):
+    # type: (str, list, list, dict, bool) -> list
+    """Build the hadoopscope command list.
+
+    force_email=True overrides send_email option (used by scheduled mode).
+    """
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hadoopscope.py")
     cmd = [sys.executable, script, "--config", config_path]
     for e in envs:
@@ -494,11 +511,13 @@ def _build_cmd(config_path, envs, checks, options):
     if options.get("debug"):
         cmd.append("--debug")
     cmd += ["--output", "text"]
+    if not (force_email or options.get("send_email", False)):
+        cmd.append("--no-email")
     return cmd
 
 
-def _short_cmd(config_path, envs, checks, options):
-    # type: (str, list, list, dict) -> str
+def _short_cmd(config_path, envs, checks, options, force_email=False):
+    # type: (str, list, list, dict, bool) -> str
     """Versione leggibile del comando: solo hadoopscope.py + argomenti."""
     parts = ["hadoopscope.py", "--config", os.path.relpath(config_path)]
     for e in envs:
@@ -509,6 +528,8 @@ def _short_cmd(config_path, envs, checks, options):
         parts.append("--dry-run")
     if options.get("debug"):
         parts.append("--debug")
+    if not (force_email or options.get("send_email", False)):
+        parts.append("--no-email")
     return " ".join(parts)
 
 
@@ -546,6 +567,207 @@ def _run_checks(stdscr, cmd):
     return ret, answer.startswith("q")
 
 
+# ── Schedule helpers ──────────────────────────────────────────────────────────
+
+def _ask_custom_interval(stdscr):
+    # type: (object) -> int
+    """Overlay dialog: ask user to type a custom repeat interval in minutes.
+
+    Returns the integer value, or 0 if cancelled.
+    """
+    max_y, max_x = stdscr.getmaxyx()
+    bw = 44
+    bh = 6
+    bx = max(0, (max_x - bw) // 2)
+    by = max(0, (max_y - bh) // 2)
+
+    _draw_box(stdscr, by, bx, bh, bw, "Custom interval")
+    _safe_addstr(stdscr, by + 1, bx + 2, "Enter interval in minutes (1-9999):")
+    _safe_addstr(stdscr, by + 4, bx + 2, "ENTER Confirm   ESC Cancel",
+                 curses.A_DIM)
+    curses.curs_set(1)
+    buf = []  # type: list
+
+    while True:
+        inp = "".join(buf)
+        _safe_addstr(stdscr, by + 2, bx + 2,
+                     "> {:<8}".format(inp), curses.color_pair(_C_SEL) | curses.A_BOLD)
+        try:
+            stdscr.move(by + 2, bx + 4 + len(buf))
+        except curses.error:
+            pass
+        stdscr.refresh()
+
+        key = stdscr.getch()
+        if key == 27:                            # ESC → cancel
+            curses.curs_set(0)
+            return 0
+        elif key in (curses.KEY_ENTER, ord('\n'), ord('\r')):
+            curses.curs_set(0)
+            if buf:
+                val = int("".join(buf))
+                return val if val > 0 else 0
+            return 0
+        elif key in (curses.KEY_BACKSPACE, 127, 8):
+            if buf:
+                buf.pop()
+        elif ord('0') <= key <= ord('9') and len(buf) < 4:
+            buf.append(chr(key))
+
+
+def _step_schedule(stdscr):
+    # type: (object) -> int
+    """STEP 5 / 5 — Choose schedule.
+
+    Returns:
+        0           run once (no repeat)
+        positive    repeat interval in minutes
+        -999        user pressed Q/ESC → go back
+    """
+    items = [(str(v), label) for v, label in SCHEDULE_OPTIONS]
+    selected = {"0"}     # default: run once
+    cursor = 0
+
+    while True:
+        stdscr.erase()
+        max_y, max_x = stdscr.getmaxyx()
+        bw = min(max_x - 4, 74)
+        bh = len(items) + 4
+        bx, by = 2, 3
+
+        _draw_header(stdscr, "  STEP 5 / 5   Schedule")
+        _draw_box(stdscr, by, bx, bh, bw, "Schedule options")
+        _draw_list(stdscr, items, cursor, selected, by, bx, bh, bw, single=True)
+
+        note = "  Scheduled runs always send email (if configured in YAML)"
+        _safe_addstr(stdscr, by + bh, bx, note, curses.A_DIM)
+
+        _draw_footer(stdscr,
+                     " UP/DOWN Navigate   SPACE Select   ENTER Confirm   Q Back")
+        stdscr.refresh()
+
+        key = stdscr.getch()
+        if key in (ord('q'), ord('Q'), 27):
+            return -999                           # sentinel: go back
+        elif key == curses.KEY_UP and cursor > 0:
+            cursor -= 1
+        elif key == curses.KEY_DOWN and cursor < len(items) - 1:
+            cursor += 1
+        elif key == ord(' '):
+            selected = {items[cursor][0]}
+        elif key in (curses.KEY_ENTER, ord('\n'), ord('\r')):
+            sel_key = list(selected)[0]
+            interval = int(sel_key)
+            if interval == -1:
+                interval = _ask_custom_interval(stdscr)
+                if interval == 0:
+                    continue                      # cancelled, stay in schedule step
+            return interval
+
+
+def _countdown_screen(stdscr, interval_secs, last_exit, run_count, last_run_time):
+    # type: (object, int, int, int, str) -> bool
+    """Show a curses countdown between scheduled runs.
+
+    Returns True when it is time to run again, False if the user quits.
+    Keys: R = run now,  Q/ESC = quit scheduled mode.
+    """
+    end_time = time.time() + interval_secs
+    stdscr.timeout(500)               # non-blocking getch (500 ms tick)
+    try:
+        while True:
+            remaining = max(0, int(end_time - time.time()))
+
+            stdscr.erase()
+            max_y, max_x = stdscr.getmaxyx()
+
+            _draw_header(stdscr,
+                         "  Scheduled — run #{} done, next in {}s".format(
+                             run_count, remaining))
+
+            cy = max(4, max_y // 2)
+            status_label = {0: "OK", 1: "WARNING", 2: "CRITICAL"}.get(
+                last_exit, "exit {}".format(last_exit))
+            color_id = {0: _C_OK, 1: _C_WARN, 2: _C_CRIT}.get(last_exit, _C_DIM)
+
+            _safe_addstr(stdscr, cy - 2, 4,
+                         "Run #{} result  : {}".format(run_count, status_label),
+                         curses.color_pair(color_id) | curses.A_BOLD)
+            _safe_addstr(stdscr, cy - 1, 4,
+                         "Completed at   : {}".format(last_run_time),
+                         curses.A_DIM)
+
+            # Progress bar
+            bar_w = min(max_x - 26, 40)
+            if interval_secs > 0:
+                pct = remaining / float(interval_secs)
+            else:
+                pct = 0.0
+            filled = int(bar_w * pct)
+            bar = "[" + "=" * filled + " " * (bar_w - filled) + "]"
+            mins, secs = divmod(remaining, 60)
+            _safe_addstr(stdscr, cy + 1, 4,
+                         "Next run in    : {:02d}:{:02d}  {}".format(mins, secs, bar))
+
+            _draw_footer(stdscr,
+                         " R = Run now   Q = Quit scheduled mode")
+            stdscr.refresh()
+
+            if remaining <= 0:
+                return True
+
+            key = stdscr.getch()         # returns -1 after 500 ms timeout
+            if key in (ord('q'), ord('Q'), 27):
+                return False
+            elif key in (ord('r'), ord('R')):
+                return True
+    finally:
+        stdscr.timeout(-1)              # restore blocking input
+
+
+def _run_scheduled(stdscr, cmd, interval_minutes):
+    # type: (object, list, int) -> None
+    """Run checks on a fixed interval until the user quits the countdown screen."""
+    interval_secs = interval_minutes * 60
+    run_count = 0
+
+    while True:
+        run_count += 1
+
+        # Suspend curses — show live output on terminal
+        curses.endwin()
+        sep = "=" * 68
+        print("\n" + sep)
+        print("  HadoopScope — Scheduled Run #{}  (every {} min)".format(
+            run_count, interval_minutes))
+        print("  Command: {}".format(" ".join(cmd)))
+        print(sep + "\n")
+        sys.stdout.flush()
+
+        try:
+            ret = subprocess.call(cmd)
+        except KeyboardInterrupt:
+            print("\n[interrupted — exiting scheduled mode]")
+            sys.stdout.flush()
+            stdscr.refresh()
+            break
+
+        last_run_time = time.strftime("%H:%M:%S")
+        status_label = {0: "OK", 1: "WARNING", 2: "CRITICAL"}.get(ret, str(ret))
+        print("\n" + sep)
+        print("  Exit: {}  ({})   Next run in {} min".format(
+            ret, status_label, interval_minutes))
+        print(sep + "\n")
+        sys.stdout.flush()
+
+        # Resume curses for countdown screen
+        stdscr.refresh()
+        keep_going = _countdown_screen(
+            stdscr, interval_secs, ret, run_count, last_run_time)
+        if not keep_going:
+            break
+
+
 # ── Main TUI loop ─────────────────────────────────────────────────────────────
 
 def _tui_main(stdscr):
@@ -566,6 +788,7 @@ def _tui_main(stdscr):
     config_path = None
     envs = None
     checks = None
+    options = None   # type: dict
 
     while True:
         # ── Step 1: config file ──────────────────────────────────────────────
@@ -609,19 +832,36 @@ def _tui_main(stdscr):
             checks = result
             step = 4
 
-        # ── Step 4: options + run ────────────────────────────────────────────
+        # ── Step 4: options ───────────────────────────────────────────────────
         elif step == 4:
             result = _step_confirm(stdscr, config_path, envs, checks)
             if result is None:
                 step = 3                     # back
                 continue
+            options = result
+            step = 5
 
-            cmd = _build_cmd(config_path, envs, checks, result)
-            _ret, quit_after = _run_checks(stdscr, cmd)
+        # ── Step 5: schedule ─────────────────────────────────────────────────
+        elif step == 5:
+            interval = _step_schedule(stdscr)
+            if interval == -999:
+                step = 4                     # back
+                continue
 
-            if quit_after:
-                break
-            step = 1                         # loop: start a new run
+            if interval == 0:
+                # Run once — manual mode, respect send_email toggle
+                cmd = _build_cmd(config_path, envs, checks, options,
+                                 force_email=False)
+                _ret, quit_after = _run_checks(stdscr, cmd)
+                if quit_after:
+                    break
+                step = 1                     # loop: start a new run
+            else:
+                # Scheduled mode — email always forced on
+                cmd = _build_cmd(config_path, envs, checks, options,
+                                 force_email=True)
+                _run_scheduled(stdscr, cmd, interval)
+                step = 1                     # return to start after user quits
 
 
 def main():

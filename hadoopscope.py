@@ -49,6 +49,8 @@ Examples:
                    help="Verbose output including capability map")
     p.add_argument("--debug", action="store_true",
                    help="Debug mode: print requests, commands and full output to stderr")
+    p.add_argument("--no-email", action="store_true",
+                   help="Skip email alerts (useful for manual/TUI runs)")
     p.add_argument("--version", action="version", version="HadoopScope 0.1.0")
     return p
 
@@ -211,13 +213,14 @@ def print_text_report(env_name, results, caps_used):
         print("Capabilities: {}".format(", ".join(sorted(caps_used))))
 
 
-def dispatch_alerts(results, cfg, env_name, output_format):
-    # type: (list, dict, str, str) -> None
+def dispatch_alerts(results, cfg, env_name, output_format, skip_email=False):
+    # type: (list, dict, str, str, bool) -> None
     """Lancia tutti gli alert handler configurati."""
     from alerts import log_alert, email_alert, webhook_alert, zabbix_alert
 
     log_alert.dispatch(results, cfg, env_name, output_format)
-    email_alert.dispatch(results, cfg, env_name)
+    if not skip_email:
+        email_alert.dispatch(results, cfg, env_name)
     webhook_alert.dispatch(results, cfg, env_name)
     zabbix_alert.dispatch(results, cfg, env_name)
 
@@ -284,7 +287,8 @@ def main():
 
         # Dispatch alerts (salvo dry-run)
         if not args.dry_run:
-            dispatch_alerts(results, cfg, env_name, args.output)
+            dispatch_alerts(results, cfg, env_name, args.output,
+                        skip_email=args.no_email)
 
     if args.output == "json":
         output = {
