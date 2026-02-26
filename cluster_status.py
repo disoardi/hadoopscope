@@ -46,14 +46,24 @@ _SEARCH_PATTERNS = [
     "hadoopscope.yml",
 ]
 
+# Nomi (prefissi) da escludere dalla TUI: file di esempio/template/test
+_IGNORE_PREFIXES = ("example", "docker-", "docker_", "test.")
+
 
 def find_config_files():
     # type: () -> list
-    """Return list of (display_label, abs_path) for discovered YAML configs."""
+    """Return list of (display_label, abs_path) for discovered YAML configs.
+
+    Files whose basename starts with a prefix in _IGNORE_PREFIXES are skipped
+    (examples, docker test fixtures, etc.).
+    """
     found = []
     seen = set()  # type: set
     for pattern in _SEARCH_PATTERNS:
         for path in sorted(_glob.glob(pattern)):
+            fname = os.path.basename(path)
+            if any(fname.startswith(p) for p in _IGNORE_PREFIXES):
+                continue
             abs_path = os.path.abspath(path)
             if abs_path not in seen:
                 seen.add(abs_path)
@@ -391,11 +401,10 @@ def _step_confirm(stdscr, config_path, envs, checks):
 
     Returns (options_dict, run) or None to go back.
     """
-    options = {"dry_run": False, "debug": False, "json_out": False}
+    options = {"dry_run": False, "debug": False}
     opt_items = [
-        ("dry_run",  "Dry-run  (validate config, no actual checks)"),
-        ("debug",    "Debug    (verbose stderr output)"),
-        ("json_out", "JSON     (output format: json instead of text)"),
+        ("dry_run", "Dry-run  (validate config, no actual checks)"),
+        ("debug",   "Debug    (verbose stderr output)"),
     ]
     cursor = 0
 
@@ -419,9 +428,14 @@ def _step_confirm(stdscr, config_path, envs, checks):
         chk_str = ", ".join(checks)
         _safe_addstr(stdscr, by + 3, bx + 2,
                      "Checks   : {}".format(chk_str))
-        cmd_preview = " ".join(_build_cmd(config_path, envs, checks, options))
+        # Mostra il comando abbreviato (senza path assoluto di python/script)
+        short_cmd = _short_cmd(config_path, envs, checks, options)
+        prefix = "Command  : "
+        avail = bw - len(prefix) - 4
+        if len(short_cmd) > avail:
+            short_cmd = short_cmd[:avail - 3] + "..."
         _safe_addstr(stdscr, by + 4, bx + 2,
-                     "Preview  : {}".format(cmd_preview),
+                     "{}{}".format(prefix, short_cmd),
                      curses.A_DIM)
 
         # ── Options box ──
@@ -479,8 +493,23 @@ def _build_cmd(config_path, envs, checks, options):
         cmd.append("--dry-run")
     if options.get("debug"):
         cmd.append("--debug")
-    cmd += ["--output", "json" if options.get("json_out") else "text"]
+    cmd += ["--output", "text"]
     return cmd
+
+
+def _short_cmd(config_path, envs, checks, options):
+    # type: (str, list, list, dict) -> str
+    """Versione leggibile del comando: solo hadoopscope.py + argomenti."""
+    parts = ["hadoopscope.py", "--config", os.path.relpath(config_path)]
+    for e in envs:
+        parts += ["--env", e]
+    for c in checks:
+        parts += ["--checks", c]
+    if options.get("dry_run"):
+        parts.append("--dry-run")
+    if options.get("debug"):
+        parts.append("--debug")
+    return " ".join(parts)
 
 
 def _run_checks(stdscr, cmd):
