@@ -16,6 +16,7 @@ Navigation:
 from __future__ import print_function
 
 import curses
+import datetime
 import glob as _glob
 import os
 import subprocess
@@ -37,14 +38,68 @@ CHECK_CATEGORIES = [
 ]
 
 SCHEDULE_OPTIONS = [
-    (0,   "Run once  (no repeat)"),
-    (5,   "Every  5 minutes"),
-    (15,  "Every 15 minutes"),
-    (30,  "Every 30 minutes"),
-    (60,  "Every 1 hour"),
-    (240, "Every 4 hours"),
-    (-1,  "Custom interval..."),
+    ("once",     "Run once  (no repeat)"),
+    ("5m",       "Every  5 minutes"),
+    ("15m",      "Every 15 minutes"),
+    ("30m",      "Every 30 minutes"),
+    ("1h",       "Every 1 hour"),
+    ("4h",       "Every 4 hours"),
+    ("daily",    "Daily at HH:MM..."),
+    ("weekdays", "Weekdays  (Mon-Fri) at HH:MM..."),
+    ("custom",   "Custom interval (minutes)..."),
 ]
+
+# ── Schedule helpers ──────────────────────────────────────────────────────────
+
+def _seconds_until_next(sched):
+    # type: (tuple) -> int
+    """Calcola i secondi al prossimo run in base al tipo di schedule.
+
+    sched = ("interval", minutes)          → fisso N minuti
+    sched = ("daily",    (hour, minute))   → ogni giorno a HH:MM
+    sched = ("weekdays", (hour, minute))   → lunedì-venerdì a HH:MM
+    """
+    stype, sval = sched
+    if stype == "interval":
+        return max(1, sval * 60)
+
+    hour, minute = sval
+    now      = datetime.datetime.now()
+    next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if next_run <= now:
+        next_run += datetime.timedelta(days=1)
+    if stype == "weekdays":
+        while next_run.weekday() >= 5:   # Sat=5, Sun=6
+            next_run += datetime.timedelta(days=1)
+    return max(1, int((next_run - now).total_seconds()))
+
+
+def _next_run_label(sched):
+    # type: (tuple) -> str
+    """Stringa human-readable che descrive quando avverrà il prossimo run."""
+    stype, sval = sched
+    if stype == "interval":
+        m = sval
+        if m >= 60 and m % 60 == 0:
+            return "every {}h".format(m // 60)
+        return "every {}min".format(m)
+
+    hour, minute = sval
+    now      = datetime.datetime.now()
+    next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if next_run <= now:
+        next_run += datetime.timedelta(days=1)
+    if stype == "weekdays":
+        while next_run.weekday() >= 5:
+            next_run += datetime.timedelta(days=1)
+
+    if next_run.date() == now.date():
+        day_str = "today"
+    elif (next_run.date() - now.date()).days == 1:
+        day_str = "tomorrow"
+    else:
+        day_str = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][next_run.weekday()]
+    return "{} at {:02d}:{:02d}".format(day_str, hour, minute)
 
 # ── Config discovery ─────────────────────────────────────────────────────────
 
@@ -569,6 +624,65 @@ def _run_checks(stdscr, cmd):
 
 # ── Schedule helpers ──────────────────────────────────────────────────────────
 
+def _ask_time(stdscr, title="Scheduled time"):
+    # type: (object, str) -> object
+    """Overlay: chiede un orario HH:MM. Restituisce (hour, minute) o None se annullato.
+
+    Accetta 4 cifre digitate (HHMM): es. 0600 → 06:00.
+    Backspace cancella l'ultima cifra. ENTER conferma, ESC annulla.
+    """
+    max_y, max_x = stdscr.getmaxyx()
+    bw = 46
+    bh = 7
+    bx = max(0, (max_x - bw) // 2)
+    by = max(0, (max_y - bh) // 2)
+
+    _draw_box(stdscr, by, bx, bh, bw, title)
+    _safe_addstr(stdscr, by + 1, bx + 2, "Enter 4 digits — HHMM  (e.g. 0600 = 06:00):")
+    _safe_addstr(stdscr, by + 5, bx + 2, "ENTER Confirm   ESC Cancel", curses.A_DIM)
+    curses.curs_set(1)
+    buf     = []   # type: list
+    err_msg = ""
+
+    while True:
+        digits  = "".join(buf)
+        padded  = (digits + "____")[:4]
+        display = "{}{}:{}{} ".format(padded[0], padded[1], padded[2], padded[3])
+        _safe_addstr(stdscr, by + 3, bx + 2,
+                     "> {}    ".format(display),
+                     curses.color_pair(_C_SEL) | curses.A_BOLD)
+        if err_msg:
+            _safe_addstr(stdscr, by + 4, bx + 2, "{:<40}".format(err_msg), curses.A_BOLD)
+        try:
+            cursor_off = len(buf) + (1 if len(buf) >= 2 else 0)
+            stdscr.move(by + 3, bx + 4 + cursor_off)
+        except curses.error:
+            pass
+        stdscr.refresh()
+
+        key = stdscr.getch()
+        if key == 27:
+            curses.curs_set(0)
+            return None
+        elif key in (curses.KEY_ENTER, ord('\n'), ord('\r')):
+            if len(buf) == 4:
+                h = int(digits[0:2])
+                m = int(digits[2:4])
+                if 0 <= h <= 23 and 0 <= m <= 59:
+                    curses.curs_set(0)
+                    return (h, m)
+                err_msg = "Invalid! Hours 00-23, minutes 00-59"
+            else:
+                err_msg = "Enter all 4 digits  (e.g. 0600)"
+        elif key in (curses.KEY_BACKSPACE, 127, 8):
+            if buf:
+                buf.pop()
+                err_msg = ""
+        elif ord('0') <= key <= ord('9') and len(buf) < 4:
+            buf.append(chr(key))
+            err_msg = ""
+
+
 def _ask_custom_interval(stdscr):
     # type: (object) -> int
     """Overlay dialog: ask user to type a custom repeat interval in minutes.
@@ -616,17 +730,19 @@ def _ask_custom_interval(stdscr):
 
 
 def _step_schedule(stdscr):
-    # type: (object) -> int
+    # type: (object) -> object
     """STEP 5 / 5 — Choose schedule.
 
     Returns:
-        0           run once (no repeat)
-        positive    repeat interval in minutes
-        -999        user pressed Q/ESC → go back
+        -999                       user pressed Q/ESC → go back
+        ("once",     0)            run once (no repeat)
+        ("interval", minutes)      repeat every N minutes
+        ("daily",    (h, m))       every day at HH:MM
+        ("weekdays", (h, m))       Mon-Fri at HH:MM
     """
-    items = [(str(v), label) for v, label in SCHEDULE_OPTIONS]
-    selected = {"0"}     # default: run once
-    cursor = 0
+    items   = [(k, label) for k, label in SCHEDULE_OPTIONS]
+    selected = {"once"}   # default: run once
+    cursor   = 0
 
     while True:
         stdscr.erase()
@@ -648,7 +764,7 @@ def _step_schedule(stdscr):
 
         key = stdscr.getch()
         if key in (ord('q'), ord('Q'), 27):
-            return -999                           # sentinel: go back
+            return -999
         elif key == curses.KEY_UP and cursor > 0:
             cursor -= 1
         elif key == curses.KEY_DOWN and cursor < len(items) - 1:
@@ -657,20 +773,36 @@ def _step_schedule(stdscr):
             selected = {items[cursor][0]}
         elif key in (curses.KEY_ENTER, ord('\n'), ord('\r')):
             sel_key = list(selected)[0]
-            interval = int(sel_key)
-            if interval == -1:
-                interval = _ask_custom_interval(stdscr)
-                if interval == 0:
-                    continue                      # cancelled, stay in schedule step
-            return interval
+
+            if sel_key == "once":
+                return ("once", 0)
+
+            _INTERVAL_MAP = {"5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240}
+            if sel_key in _INTERVAL_MAP:
+                return ("interval", _INTERVAL_MAP[sel_key])
+
+            if sel_key == "custom":
+                minutes = _ask_custom_interval(stdscr)
+                if minutes == 0:
+                    continue   # cancelled
+                return ("interval", minutes)
+
+            if sel_key in ("daily", "weekdays"):
+                title = "Daily time" if sel_key == "daily" else "Weekday time (Mon-Fri)"
+                hm = _ask_time(stdscr, title)
+                if hm is None:
+                    continue   # cancelled
+                return (sel_key, hm)
 
 
-def _countdown_screen(stdscr, interval_secs, last_exit, run_count, last_run_time):
-    # type: (object, int, int, int, str) -> bool
+def _countdown_screen(stdscr, interval_secs, last_exit, run_count, last_run_time,
+                      sched_label=""):
+    # type: (object, int, int, int, str, str) -> bool
     """Show a curses countdown between scheduled runs.
 
     Returns True when it is time to run again, False if the user quits.
     Keys: R = run now,  Q/ESC = quit scheduled mode.
+    sched_label: stringa descrittiva del tipo di schedule (es. "daily at 06:00").
     """
     end_time = time.time() + interval_secs
     stdscr.timeout(500)               # non-blocking getch (500 ms tick)
@@ -681,9 +813,10 @@ def _countdown_screen(stdscr, interval_secs, last_exit, run_count, last_run_time
             stdscr.erase()
             max_y, max_x = stdscr.getmaxyx()
 
+            header_info = sched_label if sched_label else "next in {}s".format(remaining)
             _draw_header(stdscr,
-                         "  Scheduled — run #{} done, next in {}s".format(
-                             run_count, remaining))
+                         "  Scheduled — run #{} done   {}".format(
+                             run_count, header_info))
 
             cy = max(4, max_y // 2)
             status_label = {0: "OK", 1: "WARNING", 2: "CRITICAL"}.get(
@@ -696,6 +829,10 @@ def _countdown_screen(stdscr, interval_secs, last_exit, run_count, last_run_time
             _safe_addstr(stdscr, cy - 1, 4,
                          "Completed at   : {}".format(last_run_time),
                          curses.A_DIM)
+            if sched_label:
+                _safe_addstr(stdscr, cy, 4,
+                             "Schedule       : {}".format(sched_label),
+                             curses.A_DIM)
 
             # Progress bar
             bar_w = min(max_x - 26, 40)
@@ -703,11 +840,16 @@ def _countdown_screen(stdscr, interval_secs, last_exit, run_count, last_run_time
                 pct = remaining / float(interval_secs)
             else:
                 pct = 0.0
-            filled = int(bar_w * pct)
-            bar = "[" + "=" * filled + " " * (bar_w - filled) + "]"
+            filled  = int(bar_w * pct)
+            bar     = "[" + "=" * filled + " " * (bar_w - filled) + "]"
             mins, secs = divmod(remaining, 60)
-            _safe_addstr(stdscr, cy + 1, 4,
-                         "Next run in    : {:02d}:{:02d}  {}".format(mins, secs, bar))
+            hours, mins = divmod(mins, 60)
+            if hours:
+                time_str = "{:02d}:{:02d}:{:02d}".format(hours, mins, secs)
+            else:
+                time_str = "{:02d}:{:02d}".format(mins, secs)
+            _safe_addstr(stdscr, cy + 2, 4,
+                         "Next run in    : {}  {}".format(time_str, bar))
 
             _draw_footer(stdscr,
                          " R = Run now   Q = Quit scheduled mode")
@@ -725,21 +867,30 @@ def _countdown_screen(stdscr, interval_secs, last_exit, run_count, last_run_time
         stdscr.timeout(-1)              # restore blocking input
 
 
-def _run_scheduled(stdscr, cmd, interval_minutes):
-    # type: (object, list, int) -> None
-    """Run checks on a fixed interval until the user quits the countdown screen."""
-    interval_secs = interval_minutes * 60
+def _run_scheduled(stdscr, cmd, sched):
+    # type: (object, list, tuple) -> None
+    """Run checks su schedule finché l'utente esce dal countdown screen.
+
+    sched = ("interval", minutes) | ("daily", (h,m)) | ("weekdays", (h,m))
+
+    Per schedule time-based (daily/weekdays) il tempo di attesa viene
+    ricalcolato ad ogni iterazione: se il run impiega più del previsto,
+    il countdown parte già calibrato per il prossimo slot corretto.
+    """
     run_count = 0
 
     while True:
         run_count += 1
 
+        # Calcola label statica (es. "daily at 06:00") PRIMA del run
+        sched_label = _next_run_label(sched)
+
         # Suspend curses — show live output on terminal
         curses.endwin()
         sep = "=" * 68
         print("\n" + sep)
-        print("  HadoopScope — Scheduled Run #{}  (every {} min)".format(
-            run_count, interval_minutes))
+        print("  HadoopScope — Scheduled Run #{}  ({})".format(
+            run_count, sched_label))
         print("  Command: {}".format(" ".join(cmd)))
         print(sep + "\n")
         sys.stdout.flush()
@@ -753,17 +904,23 @@ def _run_scheduled(stdscr, cmd, interval_minutes):
             break
 
         last_run_time = time.strftime("%H:%M:%S")
-        status_label = {0: "OK", 1: "WARNING", 2: "CRITICAL"}.get(ret, str(ret))
+        status_label  = {0: "OK", 1: "WARNING", 2: "CRITICAL"}.get(ret, str(ret))
+
+        # Ricalcola il tempo fino al prossimo slot DOPO il run
+        interval_secs = _seconds_until_next(sched)
+        next_label    = _next_run_label(sched)
+
         print("\n" + sep)
-        print("  Exit: {}  ({})   Next run in {} min".format(
-            ret, status_label, interval_minutes))
+        print("  Exit: {}  ({})   Next run: {}".format(
+            ret, status_label, next_label))
         print(sep + "\n")
         sys.stdout.flush()
 
         # Resume curses for countdown screen
         stdscr.refresh()
         keep_going = _countdown_screen(
-            stdscr, interval_secs, ret, run_count, last_run_time)
+            stdscr, interval_secs, ret, run_count, last_run_time,
+            sched_label=next_label)
         if not keep_going:
             break
 
@@ -843,12 +1000,12 @@ def _tui_main(stdscr):
 
         # ── Step 5: schedule ─────────────────────────────────────────────────
         elif step == 5:
-            interval = _step_schedule(stdscr)
-            if interval == -999:
+            sched = _step_schedule(stdscr)
+            if sched == -999:
                 step = 4                     # back
                 continue
 
-            if interval == 0:
+            if sched[0] == "once":
                 # Run once — manual mode, respect send_email toggle
                 cmd = _build_cmd(config_path, envs, checks, options,
                                  force_email=False)
@@ -860,7 +1017,7 @@ def _tui_main(stdscr):
                 # Scheduled mode — email always forced on
                 cmd = _build_cmd(config_path, envs, checks, options,
                                  force_email=True)
-                _run_scheduled(stdscr, cmd, interval)
+                _run_scheduled(stdscr, cmd, sched)
                 step = 1                     # return to start after user quits
 
 
