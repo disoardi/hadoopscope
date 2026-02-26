@@ -56,11 +56,12 @@ def _cm_decommissioned_hosts(config, timeout=DEFAULT_TIMEOUT):
     except Exception:
         return set()
 
+    no_proxy = config.get("no_proxy", False)
     try:
         req = Request(url)
         req.add_header("Authorization", auth)
         req.add_header("Accept", "application/json")
-        resp = urlopen(req, timeout=timeout)
+        resp = _open_url(req, timeout=timeout, no_proxy=no_proxy)
         data = json.loads(resp.read().decode("utf-8"))
     except Exception:
         # CM unreachable / wrong credentials / SSL error → fall back gracefully

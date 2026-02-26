@@ -6,7 +6,7 @@ import json
 import socket
 
 try:
-    from urllib.request import urlopen, Request
+    from urllib.request import urlopen, Request, build_opener, ProxyHandler
     from urllib.error import URLError, HTTPError
     import base64 as _base64
     def _make_auth_header(user, passwd):
@@ -15,11 +15,19 @@ try:
         ).decode()
         return "Basic {}".format(token)
 except ImportError:
-    from urllib2 import urlopen, Request, URLError, HTTPError
+    from urllib2 import urlopen, Request, build_opener, ProxyHandler, URLError, HTTPError
     import base64 as _base64
     def _make_auth_header(user, passwd):
         token = _base64.b64encode("{}:{}".format(user, passwd))
         return "Basic {}".format(token)
+
+
+def _cm_open(req, timeout, no_proxy=False):
+    # type: (Request, int, bool) -> object
+    """Open CM API request, optionally bypassing system HTTP proxy."""
+    if no_proxy:
+        return build_opener(ProxyHandler({})).open(req, timeout=timeout)
+    return urlopen(req, timeout=timeout)
 
 from checks.base import CheckBase, CheckResult
 
@@ -29,12 +37,14 @@ TIMEOUT = 10
 class ClouderaClient(object):
     """Client HTTP minimale per Cloudera Manager REST API. Zero deps."""
 
-    def __init__(self, base_url, user, password, cluster_name, api_version="v40"):
-        # type: (str, str, str, str, str) -> None
+    def __init__(self, base_url, user, password, cluster_name, api_version="v40",
+                 no_proxy=False):
+        # type: (str, str, str, str, str, bool) -> None
         self.base_url     = base_url.rstrip("/")
         self.auth_header  = _make_auth_header(user, password)
         self.cluster_name = cluster_name
         self.api_version  = api_version
+        self.no_proxy     = no_proxy
 
     def get(self, path):
         # type: (str) -> dict
@@ -45,7 +55,7 @@ class ClouderaClient(object):
         req.add_header("Authorization", self.auth_header)
         req.add_header("Accept", "application/json")
         try:
-            resp = urlopen(req, timeout=TIMEOUT)
+            resp = _cm_open(req, timeout=TIMEOUT, no_proxy=self.no_proxy)
             return json.loads(resp.read().decode("utf-8"))
         except HTTPError as e:
             raise IOError("CM HTTP {}: {} — {}".format(e.code, e.reason, url))
@@ -62,7 +72,7 @@ class ClouderaClient(object):
         req.add_header("Authorization", self.auth_header)
         req.add_header("Accept", "application/json")
         try:
-            resp = urlopen(req, timeout=TIMEOUT)
+            resp = _cm_open(req, timeout=TIMEOUT, no_proxy=self.no_proxy)
             return json.loads(resp.read().decode("utf-8"))
         except HTTPError as e:
             raise IOError("CM HTTP {}: {} — {}".format(e.code, e.reason, url))
@@ -80,6 +90,7 @@ def _make_cm_client(config):
         password     = config["cm_pass"],
         cluster_name = config["cluster_name"],
         api_version  = config.get("cm_api_version", "v40"),
+        no_proxy     = config.get("no_proxy", False),
     )
 
 
