@@ -27,7 +27,12 @@ from checks.ambari import (
 from checks.webhdfs import HdfsDataNodeCheck, HdfsSpaceCheck
 from checks.yarn import YarnNodeHealthCheck, YarnQueueCheck
 from checks.cloudera import ClouderaServiceHealthCheck
-from checks.hive import _build_beeline_url, _build_beeline_cmd, _merge_ns_cfg, _zk_host_str, _label_from_cfg
+from checks.hive import (
+    _build_beeline_url, _build_beeline_cmd, _merge_ns_cfg, _zk_host_str, _label_from_cfg,
+    _extract_stdout, _parse_databases_output, _parse_partition_output,
+    _build_db_discovery_cmd, _build_partition_query_script,
+    HivePartitionCheck,
+)
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -1209,6 +1214,153 @@ def test_extract_task_error_parses_ansible_json():
 
 
 # ---------------------------------------------------------------------------
+# HivePartitionCheck — parsing helpers
+# ---------------------------------------------------------------------------
+
+def test_extract_stdout_from_ansible_output():
+    ansible_out = (
+        'TASK [debug] ****\n'
+        'ok: [host] => {\n'
+        '    "r.stdout": "database_name\\nmydb\\nprod_dw\\n"\n'
+        '}\n'
+    )
+    result = _extract_stdout(ansible_out)
+    assert result == "database_name\nmydb\nprod_dw\n", repr(result)
+
+
+def test_extract_stdout_missing():
+    result = _extract_stdout("no stdout here")
+    assert result == ""
+
+
+def test_parse_databases_output_normal():
+    raw = "database_name\ndefault\nmydb\nprod_dw\n"
+    dbs = _parse_databases_output(raw)
+    assert dbs == ["default", "mydb", "prod_dw"], dbs
+
+
+def test_parse_databases_output_empty():
+    dbs = _parse_databases_output("")
+    assert dbs == []
+
+
+def test_parse_databases_output_no_header():
+    raw = "default\nmydb\n"
+    dbs = _parse_databases_output(raw)
+    assert "default" in dbs
+    assert "mydb" in dbs
+
+
+def test_parse_partition_output_single_db():
+    raw = (
+        "###DB:mydb###\n"
+        "table_name\tcnt\n"
+        "sales_fact\t12450\n"
+        "events_log\t800\n"
+    )
+    result = _parse_partition_output(raw)
+    assert "mydb" in result
+    assert result["mydb"]["sales_fact"] == 12450
+    assert result["mydb"]["events_log"] == 800
+
+
+def test_parse_partition_output_multi_db():
+    raw = (
+        "###DB:db1###\n"
+        "table_name\tcnt\n"
+        "tbl_a\t100\n"
+        "###DB:db2###\n"
+        "table_name\tcnt\n"
+        "tbl_b\t200\n"
+        "tbl_c\t300\n"
+    )
+    result = _parse_partition_output(raw)
+    assert result["db1"] == {"tbl_a": 100}
+    assert result["db2"] == {"tbl_b": 200, "tbl_c": 300}
+
+
+def test_parse_partition_output_empty():
+    result = _parse_partition_output("")
+    assert result == {}
+
+
+def test_parse_partition_output_skips_header():
+    raw = "###DB:mydb###\ntable_name\tcnt\nonly_table\t42\n"
+    result = _parse_partition_output(raw)
+    assert "table_name" not in result.get("mydb", {})
+    assert result["mydb"]["only_table"] == 42
+
+
+def test_build_db_discovery_cmd_contains_show_databases():
+    cfg = {"host": "hs2.example.com", "port": 10000, "user": "hive"}
+    cmd = _build_db_discovery_cmd(cfg, "hadoop")
+    assert "SHOW DATABASES" in cmd
+    assert "--outputformat=tsv2" in cmd
+    assert "--silent=true" in cmd
+
+
+def test_build_partition_query_script_markers():
+    cfg = {"host": "hs2.example.com", "port": 10000, "user": "hive"}
+    script = _build_partition_query_script(cfg, ["db1", "db2"], "hadoop")
+    assert "###DB:db1###" in script
+    assert "###DB:db2###" in script
+    assert "information_schema.partitions" in script
+    assert "table_schema='db1'" in script
+    assert "table_schema='db2'" in script
+
+
+def test_build_partition_query_script_multiline():
+    cfg = {"host": "hs2.example.com", "port": 10000}
+    script = _build_partition_query_script(cfg, ["db1", "db2"], "hadoop")
+    lines = [l for l in script.splitlines() if l.strip()]
+    # 2 DBs x 2 lines each (echo marker + beeline cmd) = 4 lines
+    assert len(lines) == 4, lines
+
+
+def test_hive_partition_check_no_edge_host():
+    cfg = {"hive": {"host": "hs2.example.com"}, "checks": {}}
+    caps = {"ansible": True}
+    check = HivePartitionCheck(cfg, caps)
+    result = check.run()
+    assert result.status == CheckResult.UNKNOWN
+    assert "edge_host" in result.message
+
+
+def test_hive_partition_threshold_logic():
+    raw = (
+        "###DB:mydb###\n"
+        "table_name\tcnt\n"
+        "big_table\t9999\n"
+        "small_table\t100\n"
+    )
+    result_data = _parse_partition_output(raw)
+    max_parts = 5000
+    over = []
+    for db, tables in result_data.items():
+        for tbl, cnt in tables.items():
+            if cnt > max_parts:
+                over.append("{}.{}".format(db, tbl))
+    assert "mydb.big_table" in over
+    assert "mydb.small_table" not in over
+
+
+def test_hive_partition_no_threshold():
+    raw = (
+        "###DB:mydb###\n"
+        "table_name\tcnt\n"
+        "tbl\t100\n"
+    )
+    result_data = _parse_partition_output(raw)
+    max_parts = 0  # disabled
+    over = [
+        tbl for db, tables in result_data.items()
+        for tbl, cnt in tables.items()
+        if max_parts > 0 and cnt > max_parts
+    ]
+    assert over == []
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -1268,6 +1420,21 @@ if __name__ == "__main__":
         test_beeline_cmd_custom_path,
         test_yaml_parser_hostport_as_string,
         test_extract_task_error_parses_ansible_json,
+        test_extract_stdout_from_ansible_output,
+        test_extract_stdout_missing,
+        test_parse_databases_output_normal,
+        test_parse_databases_output_empty,
+        test_parse_databases_output_no_header,
+        test_parse_partition_output_single_db,
+        test_parse_partition_output_multi_db,
+        test_parse_partition_output_empty,
+        test_parse_partition_output_skips_header,
+        test_build_db_discovery_cmd_contains_show_databases,
+        test_build_partition_query_script_markers,
+        test_build_partition_query_script_multiline,
+        test_hive_partition_check_no_edge_host,
+        test_hive_partition_threshold_logic,
+        test_hive_partition_no_threshold,
     ]
     failed = 0
     for t in tests:

@@ -188,6 +188,116 @@ def _extract_task_error(ansible_stdout):
         return ansible_stdout[-800:]
 
 
+def _extract_stdout(ansible_out):
+    # type: (str) -> str
+    """Extract shell stdout string from Ansible debug output (r.stdout)."""
+    m = re.search(r'"r\.stdout":\s*"((?:[^"\\]|\\.)*)"', ansible_out)
+    if m:
+        raw = m.group(1)
+        raw = raw.replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\")
+        return raw
+    return ""
+
+
+def _parse_databases_output(output):
+    # type: (str) -> list
+    """Parse beeline tsv2 output from SHOW DATABASES.
+
+    Expects one DB name per line with a header row 'database_name'.
+    Returns list of database name strings.
+    """
+    lines = [l.strip() for l in output.splitlines() if l.strip()]
+    if lines and lines[0].lower() in ("database_name", "databasename"):
+        lines = lines[1:]
+    return [l for l in lines if l]
+
+
+def _parse_partition_output(output):
+    # type: (str) -> dict
+    """Parse multi-DB partition count output.
+
+    Expects sections delimited by ###DB:dbname### markers, followed by
+    tsv2 beeline output (header row + table_name<tab>cnt rows).
+
+    Returns {db_name: {table_name: count}}.
+    """
+    result = {}  # type: dict
+    current_db = None
+    header_skipped = False
+
+    for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("###DB:") and line.endswith("###"):
+            current_db = line[6:-3]
+            result[current_db] = {}
+            header_skipped = False
+            continue
+        if current_db is None:
+            continue
+        if not header_skipped:
+            header_skipped = True
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            try:
+                result[current_db][parts[0].strip()] = int(parts[1].strip())
+            except (ValueError, IndexError):
+                pass
+
+    return result
+
+
+def _build_db_discovery_cmd(hive_cfg, default_user):
+    # type: (dict, str) -> str
+    """Build beeline command to list all Hive databases via SHOW DATABASES."""
+    beeline = hive_cfg.get("beeline_path", "beeline")
+    url     = _build_beeline_url(hive_cfg)
+    user    = hive_cfg.get("user", default_user)
+    pwd     = hive_cfg.get("password")
+    if pwd:
+        auth_str = "-n '{user}' -p '{pwd}'".format(user=user, pwd=pwd)
+    else:
+        auth_str = "-n '{user}'".format(user=user)
+    return (
+        '{beeline} -u "{url}" {auth} --silent=true --outputformat=tsv2'
+        ' -e "SHOW DATABASES;" 2>/dev/null'
+    ).format(beeline=beeline, url=url, auth=auth_str)
+
+
+def _build_partition_query_script(hive_cfg, databases, default_user):
+    # type: (dict, list, str) -> str
+    """Build multi-command shell script to count partitions per table for each DB.
+
+    Outputs sections delimited by ###DB:dbname### markers, followed by
+    tsv2 beeline output (table_name<tab>cnt per row), ready for
+    _parse_partition_output().
+    """
+    beeline = hive_cfg.get("beeline_path", "beeline")
+    url     = _build_beeline_url(hive_cfg)
+    user    = hive_cfg.get("user", default_user)
+    pwd     = hive_cfg.get("password")
+    if pwd:
+        auth_str = "-n '{user}' -p '{pwd}'".format(user=user, pwd=pwd)
+    else:
+        auth_str = "-n '{user}'".format(user=user)
+    conn = '{beeline} -u "{url}" {auth} --silent=true --outputformat=tsv2'.format(
+        beeline=beeline, url=url, auth=auth_str
+    )
+    lines = []
+    for db in databases:
+        query = (
+            "SELECT table_name, COUNT(*) as cnt"
+            " FROM information_schema.partitions"
+            " WHERE table_schema='{}'"
+            " GROUP BY table_name ORDER BY cnt DESC;"
+        ).format(db)
+        lines.append('echo "###DB:{}###"'.format(db))
+        lines.append('{conn} -e "{query}" 2>/dev/null'.format(conn=conn, query=query))
+    return "\n".join(lines)
+
+
 class HiveCheck(CheckBase):
     """
     Controlla la disponibilità di HiveServer2 via beeline tramite Ansible.
@@ -348,12 +458,12 @@ class HiveCheck(CheckBase):
           rc == -1 : subprocess timeout (60s)
           rc == -2 : unexpected exception (err contains message)
         """
+        script_parts = []
         if kinit_cmd:
-            shell_lines = "        {kinit}\n        {beeline}".format(
-                kinit=kinit_cmd, beeline=beeline_cmd
-            )
-        else:
-            shell_lines = "        {}".format(beeline_cmd)
+            script_parts.append(kinit_cmd)
+        for line in beeline_cmd.splitlines():
+            script_parts.append(line)
+        shell_lines = "\n".join("        " + l for l in script_parts)
 
         playbook = (
             "---\n"
@@ -429,3 +539,144 @@ class HiveCheck(CheckBase):
         if os.path.exists(venv_bin):
             return venv_bin
         return None
+
+
+class HivePartitionCheck(HiveCheck):
+    """
+    Conta le partizioni per tabella su uno o più database Hive.
+    Usa Ansible+beeline (information_schema.partitions) — solo metadata, no data scan.
+
+    Config:
+      checks:
+        hive_partitions:
+          databases:          # lista DB da controllare; ometti per auto-discover (SHOW DATABASES)
+            - mydb
+            - prod_dw
+          max_partitions: 5000  # WARNING se una tabella supera questa soglia (0 = nessun limite)
+
+    Connessione: eredita tutta la config hive: (jdbc_url, kerberos, ssl, beeline_path, ecc.)
+    dall'environment, identica a HiveCheck.
+    """
+
+    def run(self):
+        # type: () -> CheckResult
+        ansible_cfg = self.config.get("ansible", {})
+        edge_host   = ansible_cfg.get("edge_host")
+        ssh_user    = ansible_cfg.get("ssh_user", "hadoop")
+        ssh_key     = ansible_cfg.get("ssh_key")
+        hive_cfg    = self.config.get("hive", {})
+        part_cfg    = self.config.get("checks", {}).get("hive_partitions", {})
+
+        if not edge_host:
+            return CheckResult(
+                name="HivePartitionCheck",
+                status=CheckResult.UNKNOWN,
+                message="ansible.edge_host not configured"
+            )
+
+        ansible_bin = self._find_ansible()
+        if not ansible_bin:
+            return CheckResult(
+                name="HivePartitionCheck",
+                status=CheckResult.SKIPPED,
+                message="ansible binary not found despite can_run() check"
+            )
+
+        inventory  = self._build_inventory(edge_host, ssh_user, ssh_key)
+        databases  = list(part_cfg.get("databases") or [])
+        max_parts  = int(part_cfg.get("max_partitions", 0))
+        kinit_cmd  = _build_kinit_cmd(hive_cfg)
+
+        _debug.log("HivePartitionCheck",
+                   "databases: {}  max_partitions: {}".format(
+                       databases if databases else "auto-discover", max_parts))
+
+        # Step 1: auto-discover databases se non configurati
+        if not databases:
+            cmd = _build_db_discovery_cmd(hive_cfg, ssh_user)
+            rc, out, err = self._run_playbook(
+                ansible_bin, inventory, cmd,
+                tag="HivePartitionCheck.discover_db",
+                kinit_cmd=kinit_cmd
+            )
+            if rc != 0:
+                return CheckResult(
+                    name="HivePartitionCheck",
+                    status=CheckResult.UNKNOWN,
+                    message="Failed to list databases (rc={})".format(rc)
+                )
+            raw = _extract_stdout(out)
+            databases = _parse_databases_output(raw)
+            _debug.log("HivePartitionCheck",
+                       "discovered: {}".format(databases))
+            if not databases:
+                return CheckResult(
+                    name="HivePartitionCheck",
+                    status=CheckResult.UNKNOWN,
+                    message="No databases found — check beeline connectivity"
+                )
+            kinit_cmd = None  # già eseguito, non ripetere
+
+        # Step 2: conteggio partizioni per tabella per ogni DB
+        script = _build_partition_query_script(hive_cfg, databases, ssh_user)
+        rc, out, err = self._run_playbook(
+            ansible_bin, inventory, script,
+            tag="HivePartitionCheck",
+            kinit_cmd=kinit_cmd
+        )
+        if rc != 0:
+            from checks.hive import _extract_task_error  # noqa
+            task_err = _extract_task_error(out)
+            return CheckResult(
+                name="HivePartitionCheck",
+                status=CheckResult.UNKNOWN,
+                message="Failed to get partition counts (rc={}): {}".format(
+                    rc, task_err[:200])
+            )
+
+        raw = _extract_stdout(out)
+        db_data = _parse_partition_output(raw)
+
+        if not db_data:
+            return CheckResult(
+                name="HivePartitionCheck",
+                status=CheckResult.UNKNOWN,
+                message="No partition data returned — check beeline output"
+            )
+
+        # Calcola totali e verifica soglia
+        over   = []   # type: list
+        summary = {}  # type: dict
+        for db_name, tables in sorted(db_data.items()):
+            total = sum(tables.values())
+            summary[db_name] = {"total_partitions": total, "tables": len(tables)}
+            if max_parts > 0:
+                for tbl, cnt in sorted(tables.items(), key=lambda x: -x[1]):
+                    if cnt > max_parts:
+                        over.append("{}.{}: {}".format(db_name, tbl, cnt))
+
+        details = {"databases": summary}
+        if over:
+            details["over_threshold"] = over
+
+        if over:
+            over_preview = over[:5]
+            suffix = " (+{} more)".format(len(over) - 5) if len(over) > 5 else ""
+            return CheckResult(
+                name="HivePartitionCheck",
+                status=CheckResult.WARNING,
+                message="Tables exceeding {} partitions: {}{}".format(
+                    max_parts, "; ".join(over_preview), suffix),
+                details=details
+            )
+
+        db_summaries = [
+            "{}: {} tables, {} partitions".format(k, v["tables"], v["total_partitions"])
+            for k, v in sorted(summary.items())
+        ]
+        return CheckResult(
+            name="HivePartitionCheck",
+            status=CheckResult.OK,
+            message="Hive partitions OK — {}".format("; ".join(db_summaries)),
+            details=details
+        )
