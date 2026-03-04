@@ -294,7 +294,7 @@ def _build_partition_query_script(hive_cfg, databases, default_user):
             " GROUP BY table_name ORDER BY cnt DESC;"
         ).format(db)
         lines.append('echo "###DB:{}###"'.format(db))
-        lines.append('{conn} -e "{query}" 2>/dev/null'.format(conn=conn, query=query))
+        lines.append('{conn} -e "{query}" 2>/dev/null || true'.format(conn=conn, query=query))
     return "\n".join(lines)
 
 
