@@ -508,17 +508,20 @@ class HiveCheck(CheckBase):
         )
 
     def _run_playbook(self, ansible_bin, inventory_content, beeline_cmd,
-                      tag="HiveCheck", kinit_cmd=None):
-        # type: (str, str, str, str, object) -> tuple
+                      tag="HiveCheck", kinit_cmd=None, timeout=60):
+        # type: (str, str, str, str, object, int) -> tuple
         """Run Ansible playbook with optional kinit + beeline command.
 
         kinit_cmd: if set, a 'kinit -kt <keytab> <principal>' command run on the
         edge node BEFORE beeline. Both keytab and principal must be paths/values
         on the edge node, not on the machine running hadoopscope.
 
+        timeout: subprocess timeout in seconds (default 60; use higher value for
+        long-running scripts like HivePartitionCheck).
+
         Returns (rc, stdout, stderr):
           rc >= 0  : actual Ansible exit code
-          rc == -1 : subprocess timeout (60s)
+          rc == -1 : subprocess timeout
           rc == -2 : unexpected exception (err contains message)
         """
         script_parts = []
@@ -568,7 +571,7 @@ class HiveCheck(CheckBase):
                 stderr=subprocess.PIPE,
                 env=env
             )
-            stdout, stderr = proc.communicate(timeout=60)
+            stdout, stderr = proc.communicate(timeout=timeout)
             out = stdout.decode("utf-8", errors="replace")
             err = stderr.decode("utf-8", errors="replace")
             _debug.log(tag, "rc: {}".format(proc.returncode))
@@ -580,7 +583,7 @@ class HiveCheck(CheckBase):
             return (proc.returncode, out, err)
 
         except subprocess.TimeoutExpired:
-            return -1, "", "timeout after 60s"
+            return -1, "", "timeout after {}s".format(timeout)
         except Exception as e:
             return -2, "", str(e)
         finally:
@@ -606,8 +609,12 @@ class HiveCheck(CheckBase):
 
 class HivePartitionCheck(HiveCheck):
     """
-    Conta le partizioni per tabella su uno o più database Hive.
-    Usa Ansible+beeline (information_schema.partitions) — solo metadata, no data scan.
+    Conta le partizioni per tabella su uno o più database Hive via SHOW PARTITIONS.
+    Usa Ansible+beeline su edge node — solo metadata, nessun data scan.
+
+    Per ogni DB: SHOW TABLES → build SQL tmpfile → SHOW PARTITIONS <db>.<tbl> per ogni tabella
+    in una singola sessione beeline. Evita information_schema.partitions che su CDP con Ranger
+    può restituire 0 righe anche quando le partizioni esistono.
 
     Config:
       checks:
@@ -616,6 +623,7 @@ class HivePartitionCheck(HiveCheck):
             - mydb
             - prod_dw
           max_partitions: 5000  # WARNING se una tabella supera questa soglia (0 = nessun limite)
+          timeout: 300          # secondi per l'Ansible playbook (default 300)
 
     Connessione: eredita tutta la config hive: (jdbc_url, kerberos, ssl, beeline_path, ecc.)
     dall'environment, identica a HiveCheck.
@@ -648,11 +656,13 @@ class HivePartitionCheck(HiveCheck):
         inventory  = self._build_inventory(edge_host, ssh_user, ssh_key)
         databases  = list(part_cfg.get("databases") or [])
         max_parts  = int(part_cfg.get("max_partitions", 0))
+        play_timeout = int(part_cfg.get("timeout", 300))
         kinit_cmd  = _build_kinit_cmd(hive_cfg)
 
         _debug.log("HivePartitionCheck",
-                   "databases: {}  max_partitions: {}".format(
-                       databases if databases else "auto-discover", max_parts))
+                   "databases: {}  max_partitions: {}  timeout: {}s".format(
+                       databases if databases else "auto-discover",
+                       max_parts, play_timeout))
 
         # Step 1: auto-discover databases se non configurati
         if not databases:
@@ -685,10 +695,10 @@ class HivePartitionCheck(HiveCheck):
         rc, out, err = self._run_playbook(
             ansible_bin, inventory, script,
             tag="HivePartitionCheck",
-            kinit_cmd=kinit_cmd
+            kinit_cmd=kinit_cmd,
+            timeout=play_timeout
         )
         if rc != 0:
-            from checks.hive import _extract_task_error  # noqa
             task_err = _extract_task_error(out)
             return CheckResult(
                 name="HivePartitionCheck",

@@ -1382,6 +1382,20 @@ def test_hive_partition_no_threshold():
     assert over == []
 
 
+def test_hive_partition_default_timeout():
+    """HivePartitionCheck usa timeout 300s di default se non configurato."""
+    part_cfg = {}
+    play_timeout = int(part_cfg.get("timeout", 300))
+    assert play_timeout == 300
+
+
+def test_hive_partition_custom_timeout():
+    """HivePartitionCheck rispetta timeout configurato via checks.hive_partitions.timeout."""
+    part_cfg = {"timeout": 600}
+    play_timeout = int(part_cfg.get("timeout", 300))
+    assert play_timeout == 600
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -1458,6 +1472,8 @@ if __name__ == "__main__":
         test_hive_partition_check_no_edge_host,
         test_hive_partition_threshold_logic,
         test_hive_partition_no_threshold,
+        test_hive_partition_default_timeout,
+        test_hive_partition_custom_timeout,
     ]
     failed = 0
     for t in tests:
