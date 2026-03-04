@@ -216,35 +216,73 @@ def _parse_partition_output(output):
     # type: (str) -> dict
     """Parse multi-DB partition count output.
 
-    Expects sections delimited by ###DB:dbname### markers, followed by
-    tsv2 beeline output (header row + table_name<tab>cnt rows).
+    Supporta due formati:
+
+    Formato A — SHOW PARTITIONS (nuovo, default):
+      ###DB:dbname###
+      _c0                        <- header SELECT
+      ###TAB:table1###           <- marker tabella
+      partition                  <- header SHOW PARTITIONS
+      dt=20260101/field=val      <- riga partizione (contata)
+      ...
+
+    Formato B — information_schema (legacy, per retrocompatibilità test):
+      ###DB:dbname###
+      table_name<tab>count       <- riga dati tab-separated
 
     Returns {db_name: {table_name: count}}.
     """
-    result = {}  # type: dict
-    current_db = None
-    header_skipped = False
+    # Header lines da ignorare in entrambi i formati
+    SKIP_LINES = {"_c0", "partition", "tab_name", ""}
 
-    for line in output.splitlines():
-        line = line.strip()
-        if not line:
-            continue
+    result = {}      # type: dict
+    current_db  = None
+    current_tbl = None
+    tbl_counts  = {}  # type: dict
+
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+
+        # DB marker
         if line.startswith("###DB:") and line.endswith("###"):
-            current_db = line[6:-3]
-            result[current_db] = {}
-            header_skipped = False
+            if current_db is not None:
+                result[current_db] = dict(tbl_counts)
+            current_db  = line[6:-3]
+            current_tbl = None
+            tbl_counts  = {}
             continue
+
         if current_db is None:
             continue
-        if not header_skipped:
-            header_skipped = True
+
+        # Salta header noti
+        if line in SKIP_LINES:
             continue
-        parts = line.split("\t")
-        if len(parts) >= 2:
-            try:
-                result[current_db][parts[0].strip()] = int(parts[1].strip())
-            except (ValueError, IndexError):
-                pass
+
+        # TAB marker (formato A)
+        if line.startswith("###TAB:") and line.endswith("###"):
+            current_tbl = line[7:-3]
+            if current_tbl not in tbl_counts:
+                tbl_counts[current_tbl] = 0
+            continue
+
+        # Formato B: table_name<tab>count (legacy information_schema)
+        if current_tbl is None and "\t" in line:
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                try:
+                    tbl_counts[parts[0].strip()] = int(parts[1].strip())
+                except (ValueError, IndexError):
+                    pass
+            continue
+
+        # Formato A: riga partition spec (qualsiasi riga non vuota dopo ###TAB:)
+        if current_tbl is not None:
+            tbl_counts[current_tbl] = tbl_counts.get(current_tbl, 0) + 1
+
+    # Salva l'ultimo DB
+    if current_db is not None:
+        result[current_db] = dict(tbl_counts)
 
     return result
 
@@ -270,31 +308,56 @@ def _build_partition_query_script(hive_cfg, databases, default_user):
     # type: (dict, list, str) -> str
     """Build multi-command shell script to count partitions per table for each DB.
 
-    Outputs sections delimited by ###DB:dbname### markers, followed by
-    tsv2 beeline output (table_name<tab>cnt per row), ready for
-    _parse_partition_output().
+    Per ogni DB:
+      1. SHOW TABLES IN <db> — recupera la lista tabelle (1 connessione beeline)
+      2. Costruisce un file SQL temporaneo con SELECT '###TAB:xxx###' + SHOW PARTITIONS
+         per ogni tabella, poi lo esegue in un'unica sessione beeline (1 connessione)
+
+    Totale: 2 connessioni beeline per DB, indipendentemente dal numero di tabelle.
+
+    Evita information_schema.partitions che su CDP con Ranger può restituire 0 righe
+    anche quando le partizioni esistono.
+
+    Output (stdout Ansible):
+      ###DB:dbname###
+      _c0
+      ###TAB:table1###
+      partition
+      dt=20260101/field=val
+      ...
+      _c0
+      ###TAB:table2###
+      ...
+    Parsato da _parse_partition_output().
     """
     beeline = hive_cfg.get("beeline_path", "beeline")
     url     = _build_beeline_url(hive_cfg)
     user    = hive_cfg.get("user", default_user)
     pwd     = hive_cfg.get("password")
     if pwd:
-        auth_str = "-n '{user}' -p '{pwd}'".format(user=user, pwd=pwd)
+        auth_str = "-n '" + user + "' -p '" + pwd + "'"
     else:
-        auth_str = "-n '{user}'".format(user=user)
-    conn = '{beeline} -u "{url}" {auth} --silent=true --outputformat=tsv2'.format(
-        beeline=beeline, url=url, auth=auth_str
-    )
+        auth_str = "-n '" + user + "'"
+    conn = beeline + ' -u "' + url + '" ' + auth_str + " --silent=true --outputformat=tsv2"
+
     lines = []
     for db in databases:
-        query = (
-            "SELECT table_name, COUNT(*) as cnt"
-            " FROM information_schema.partitions"
-            " WHERE table_schema='{}'"
-            " GROUP BY table_name ORDER BY cnt DESC;"
-        ).format(db)
-        lines.append('echo "###DB:{}###"'.format(db))
-        lines.append('{conn} -e "{query}" 2>/dev/null || true'.format(conn=conn, query=query))
+        lines.append('echo "###DB:' + db + '###"')
+        # Crea file SQL temporaneo
+        lines.append('_HS_F=$(mktemp /tmp/hs_XXXXXX.sql 2>/dev/null || echo "/tmp/hs_$$.sql")')
+        # Popola il file: per ogni tabella un marker SELECT + SHOW PARTITIONS
+        lines.append(
+            'for _tbl in $(' + conn + ' -e "SHOW TABLES IN ' + db + ';" 2>/dev/null'
+            ' | grep -v "^tab_name$" | grep -v "^$"); do'
+        )
+        lines.append("    printf \"SELECT '###TAB:%s###';\\n\" \"$_tbl\" >> \"$_HS_F\"")
+        lines.append('    printf "SHOW PARTITIONS ' + db + '.%s;\\n" "$_tbl" >> "$_HS_F"')
+        lines.append('done')
+        # Esegui tutto in una singola sessione beeline
+        lines.append('if [ -s "$_HS_F" ]; then')
+        lines.append('    ' + conn + ' -f "$_HS_F" 2>/dev/null || true')
+        lines.append('fi')
+        lines.append('rm -f "$_HS_F"')
     return "\n".join(lines)
 
 

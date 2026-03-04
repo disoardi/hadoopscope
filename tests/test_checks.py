@@ -1304,17 +1304,39 @@ def test_build_partition_query_script_markers():
     script = _build_partition_query_script(cfg, ["db1", "db2"], "hadoop")
     assert "###DB:db1###" in script
     assert "###DB:db2###" in script
-    assert "information_schema.partitions" in script
-    assert "table_schema='db1'" in script
-    assert "table_schema='db2'" in script
+    assert "SHOW TABLES IN db1" in script
+    assert "SHOW TABLES IN db2" in script
+    assert "SHOW PARTITIONS db1" in script
+    assert "SHOW PARTITIONS db2" in script
+    assert "###TAB:" in script
 
 
-def test_build_partition_query_script_multiline():
+def test_build_partition_query_script_uses_tmpfile():
     cfg = {"host": "hs2.example.com", "port": 10000}
-    script = _build_partition_query_script(cfg, ["db1", "db2"], "hadoop")
-    lines = [l for l in script.splitlines() if l.strip()]
-    # 2 DBs x 2 lines each (echo marker + beeline cmd) = 4 lines
-    assert len(lines) == 4, lines
+    script = _build_partition_query_script(cfg, ["mydb"], "hadoop")
+    assert "mktemp" in script
+    assert "-f " in script   # beeline -f <tmpfile>
+    assert "rm -f" in script
+
+
+def test_parse_partition_output_tab_format_new():
+    # Formato A: ###TAB: markers + partition spec lines
+    raw = (
+        "###DB:mydb###\n"
+        "_c0\n"
+        "###TAB:sales_fact###\n"
+        "partition\n"
+        "dt=20260101/region=IT\n"
+        "dt=20260102/region=IT\n"
+        "dt=20260103/region=IT\n"
+        "_c0\n"
+        "###TAB:events_log###\n"
+        "partition\n"
+        "dt=20260101/region=IT\n"
+    )
+    result = _parse_partition_output(raw)
+    assert result["mydb"]["sales_fact"] == 3
+    assert result["mydb"]["events_log"] == 1
 
 
 def test_hive_partition_check_no_edge_host():
@@ -1431,7 +1453,8 @@ if __name__ == "__main__":
         test_parse_partition_output_skips_header,
         test_build_db_discovery_cmd_contains_show_databases,
         test_build_partition_query_script_markers,
-        test_build_partition_query_script_multiline,
+        test_build_partition_query_script_uses_tmpfile,
+        test_parse_partition_output_tab_format_new,
         test_hive_partition_check_no_edge_host,
         test_hive_partition_threshold_logic,
         test_hive_partition_no_threshold,
