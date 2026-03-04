@@ -32,7 +32,7 @@ CHECK_CATEGORIES = [
     ("all",    "All checks (health + hdfs + hive + yarn)"),
     ("health", "Service health (Ambari / Cloudera Manager)"),
     ("hdfs",   "HDFS: space, DataNodes, writability"),
-    ("hive",   "HiveServer2 connectivity"),
+    ("hive",   "Hive: HS2 connectivity + partition counts"),
     ("yarn",   "YARN: node health + queue usage"),
 ]
 
