@@ -370,7 +370,8 @@ def _build_partition_query_script(hive_cfg, databases, default_user):
         lines.append('    echo "=== SQL FILE [' + db + '] ===" >&2')
         lines.append('    cat "$_HS_F" >&2')
         lines.append('    echo "=== END SQL FILE ===" >&2')
-        lines.append('    ' + conn + ' -f "$_HS_F" 2>/dev/null || true')
+        # --force: continua l'esecuzione anche su SHOW PARTITIONS di tabelle non partizionate
+        lines.append('    ' + conn + ' --force -f "$_HS_F" 2>/dev/null || true')
         lines.append('fi')
         lines.append('rm -f "$_HS_F"')
     return "\n".join(lines)
