@@ -317,6 +317,23 @@ def _my_open(req, timeout, no_proxy=False):
 **Verifica**: `grep -r "urlopen(" checks/` non deve mai restituire chiamate dirette —
 ogni `urlopen` deve essere avvolto nell'helper.
 
+### `beeline -f` — sempre usare `--force`
+Quando si esegue `beeline -f file.sql` con un file che contiene `SHOW PARTITIONS`
+su più tabelle, senza `--force` beeline si ferma alla prima tabella **non partizionata**
+(`SHOW PARTITIONS` restituisce errore → stop immediato). Il risultato è che solo la
+prima tabella appare nell'output e le successive vengono silenziosamente saltate.
+**Regola**: usare sempre `--force` con `beeline -f` quando il file contiene statement
+che possono fallire su alcune tabelle.
+
+### Debugging script bash su nodi remoti (file temporanei)
+Quando un playbook Ansible esegue uno script bash che genera file temporanei
+(es. `$_HS_F` in `HivePartitionCheck`), per vedere il contenuto del file in `--debug`:
+1. Aggiungere `cat "$_HS_F" >&2` prima di eseguirlo → va in `r.stderr` di Ansible
+2. Aggiungere `- debug: var=r.stderr` al playbook dopo `- debug: var=r.stdout`
+3. Usare `_extract_stderr(ansible_out)` (analogo a `_extract_stdout`) per estrarlo
+Questo pattern permette di vedere cosa viene inviato a beeline senza modificare
+il parsing dell'output stdout.
+
 ### Crontab manager — formato entry HadoopScope
 Le entry gestite da `_step_crontab_manager` in `cluster_status.py` seguono questo formato:
 ```
