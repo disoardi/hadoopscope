@@ -196,9 +196,13 @@ def print_text_report(env_name, results, caps_used):
                     CheckResult.UNKNOWN, CheckResult.SKIPPED, "DRY_RUN"]
     counts = {s: 0 for s in all_statuses}
 
+    indent = " " * 12  # allinea sotto il nome del check (len("[WARNING ]  "))
     for r in results:
         icon = status_icons.get(r.status, "[?       ]")
-        print("{}  {} — {}".format(icon, r.name, r.message))
+        lines = r.message.splitlines() if r.message else [""]
+        print("{}  {} — {}".format(icon, r.name, lines[0]))
+        for line in lines[1:]:
+            print("{}{}".format(indent, line))
         counts[r.status] = counts.get(r.status, 0) + 1
 
     print()

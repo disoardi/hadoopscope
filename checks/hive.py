@@ -762,12 +762,14 @@ class HivePartitionCheck(HiveCheck):
 
         if over:
             over_preview = over[:5]
-            suffix = " (+{} more)".format(len(over) - 5) if len(over) > 5 else ""
+            lines = ["Tables exceeding {} partitions:".format(max_parts)]
+            lines += ["  " + t for t in over_preview]
+            if len(over) > 5:
+                lines.append("  (+{} more)".format(len(over) - 5))
             return CheckResult(
                 name="HivePartitionCheck",
                 status=CheckResult.WARNING,
-                message="Tables exceeding {} partitions: {}{}".format(
-                    max_parts, "; ".join(over_preview), suffix),
+                message="\n".join(lines),
                 details=details
             )
 
