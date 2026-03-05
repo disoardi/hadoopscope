@@ -199,6 +199,17 @@ def _extract_stdout(ansible_out):
     return ""
 
 
+def _extract_stderr(ansible_out):
+    # type: (str) -> str
+    """Extract shell stderr string from Ansible debug output (r.stderr)."""
+    m = re.search(r'"r\.stderr":\s*"((?:[^"\\]|\\.)*)"', ansible_out)
+    if m:
+        raw = m.group(1)
+        raw = raw.replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\")
+        return raw
+    return ""
+
+
 def _parse_databases_output(output):
     # type: (str) -> list
     """Parse beeline tsv2 output from SHOW DATABASES.
@@ -355,6 +366,10 @@ def _build_partition_query_script(hive_cfg, databases, default_user):
         lines.append('done')
         # Esegui tutto in una singola sessione beeline
         lines.append('if [ -s "$_HS_F" ]; then')
+        # Manda il contenuto del file SQL su stderr (visibile in r.stderr Ansible, --debug)
+        lines.append('    echo "=== SQL FILE [' + db + '] ===" >&2')
+        lines.append('    cat "$_HS_F" >&2')
+        lines.append('    echo "=== END SQL FILE ===" >&2')
         lines.append('    ' + conn + ' -f "$_HS_F" 2>/dev/null || true')
         lines.append('fi')
         lines.append('rm -f "$_HS_F"')
@@ -542,6 +557,7 @@ class HiveCheck(CheckBase):
             "{shell_lines}\n"
             "      register: r\n"
             "    - debug: var=r.stdout\n"
+            "    - debug: var=r.stderr\n"
         ).format(shell_lines=shell_lines)
 
         inv_path = play_path = None
@@ -577,8 +593,19 @@ class HiveCheck(CheckBase):
             _debug.log(tag, "rc: {}".format(proc.returncode))
             _debug.section(tag, "ansible stdout")
             _debug.log(tag, out if out.strip() else "(empty)", multiline=True)
+            # Estrai e mostra r.stdout e r.stderr dal debug task Ansible
+            r_stdout = _extract_stdout(out)
+            r_stderr = _extract_stderr(out)
+            if r_stdout.strip():
+                _debug.section(tag, "r.stdout (beeline output)")
+                _debug.log(tag, r_stdout, multiline=True)
+            else:
+                _debug.log(tag, "r.stdout: (empty)")
+            if r_stderr.strip():
+                _debug.section(tag, "r.stderr (beeline stderr / SQL file)")
+                _debug.log(tag, r_stderr, multiline=True)
             if err.strip():
-                _debug.section(tag, "ansible stderr")
+                _debug.section(tag, "ansible process stderr")
                 _debug.log(tag, err, multiline=True)
             return (proc.returncode, out, err)
 

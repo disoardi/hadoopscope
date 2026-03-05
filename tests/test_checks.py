@@ -29,7 +29,7 @@ from checks.yarn import YarnNodeHealthCheck, YarnQueueCheck
 from checks.cloudera import ClouderaServiceHealthCheck
 from checks.hive import (
     _build_beeline_url, _build_beeline_cmd, _merge_ns_cfg, _zk_host_str, _label_from_cfg,
-    _extract_stdout, _parse_databases_output, _parse_partition_output,
+    _extract_stdout, _extract_stderr, _parse_databases_output, _parse_partition_output,
     _build_db_discovery_cmd, _build_partition_query_script,
     HivePartitionCheck,
 )
@@ -1233,6 +1233,23 @@ def test_extract_stdout_missing():
     assert result == ""
 
 
+def test_extract_stderr_from_ansible_output():
+    ansible_out = (
+        'TASK [debug] ****\n'
+        'ok: [host] => {\n'
+        '    "r.stderr": "=== SQL FILE [mydb] ===\\nSELECT \'###TAB:t1###\';\\n=== END SQL FILE ===\\n"\n'
+        '}\n'
+    )
+    result = _extract_stderr(ansible_out)
+    assert "SQL FILE [mydb]" in result, repr(result)
+    assert "SELECT" in result, repr(result)
+
+
+def test_extract_stderr_missing():
+    result = _extract_stderr("no stderr here")
+    assert result == ""
+
+
 def test_parse_databases_output_normal():
     raw = "database_name\ndefault\nmydb\nprod_dw\n"
     dbs = _parse_databases_output(raw)
@@ -1458,6 +1475,8 @@ if __name__ == "__main__":
         test_extract_task_error_parses_ansible_json,
         test_extract_stdout_from_ansible_output,
         test_extract_stdout_missing,
+        test_extract_stderr_from_ansible_output,
+        test_extract_stderr_missing,
         test_parse_databases_output_normal,
         test_parse_databases_output_empty,
         test_parse_databases_output_no_header,
