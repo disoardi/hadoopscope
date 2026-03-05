@@ -15,6 +15,7 @@ from config import load_config
 from bootstrap import discover_capabilities, ensure_ansible, print_capabilities
 from checks.base import CheckResult
 import debug as _debug
+import applog as _applog
 
 
 def build_arg_parser():
@@ -258,6 +259,9 @@ def main():
         print("ERROR loading config: {}".format(e), file=sys.stderr)
         sys.exit(1)
 
+    # Inizializza logger rotante (usa i default se sezione logging assente)
+    _applog.setup(cfg)
+
     # Assicura Ansible disponibile se serve
     caps = ensure_ansible(caps)
 
@@ -277,8 +281,14 @@ def main():
             print("SKIP: environment '{}' is disabled".format(env_name))
             continue
 
+        checks_arg = ",".join(args.checks) if args.checks else "all"
+        _applog.log_run_start(env_name, checks_arg)
         results = run_checks_for_env(env_name, env_config, cfg, caps, args)
         all_results[env_name] = results
+
+        for r in results:
+            _applog.log_result(r)
+        _applog.log_run_end(env_name, results)
 
         if args.output == "text":
             print("\nHadoopScope — {} @ {}".format(
