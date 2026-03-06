@@ -31,7 +31,8 @@ from checks.hive import (
     _build_beeline_url, _build_beeline_cmd, _merge_ns_cfg, _zk_host_str, _label_from_cfg,
     _extract_stdout, _extract_stderr, _parse_databases_output, _parse_partition_output,
     _build_db_discovery_cmd, _build_partition_query_script,
-    _build_show_tables_script, _parse_show_tables_output, _build_show_partitions_script,
+    _build_beeline_conn, _build_show_tables_sql, _parse_show_tables_output,
+    _build_show_partitions_sql,
     HivePartitionCheck,
 )
 
@@ -1415,39 +1416,37 @@ def test_hive_partition_custom_timeout():
 
 
 # ---------------------------------------------------------------------------
-# _build_show_tables_script + _parse_show_tables_output + _build_show_partitions_script
+# _build_beeline_conn + _build_show_tables_sql + _parse_show_tables_output
+# + _build_show_partitions_sql
 # ---------------------------------------------------------------------------
 
-def test_build_show_tables_script_one_beeline_call():
-    """Una sola invocazione beeline per tutti i DB (non N)."""
+def test_build_beeline_conn_contains_url_and_auth():
     cfg = {"host": "hs2.example.com", "port": 10000, "user": "hive"}
-    script = _build_show_tables_script(cfg, ["db1", "db2", "db3"], "hadoop")
-    # Deve contenere i marker per tutti e 3 i DB
-    assert "###DB:db1###" in script
-    assert "###DB:db2###" in script
-    assert "###DB:db3###" in script
-    # SHOW TABLES per ogni DB
-    assert "SHOW TABLES IN db1" in script
-    assert "SHOW TABLES IN db2" in script
-    assert "SHOW TABLES IN db3" in script
-    # tmpfile creato e rimosso
-    assert "mktemp" in script
-    assert "rm -f" in script
-    # Una sola chiamata beeline -f (non N chiamate nel loop)
-    assert "--force -f" in script
-    assert script.count("--force -f") == 1
+    conn = _build_beeline_conn(cfg, "hadoop")
+    assert "jdbc:hive2://hs2.example.com:10000" in conn
+    assert "-n 'hive'" in conn
+    assert "--silent=true" in conn
+    assert "--outputformat=tsv2" in conn
 
 
-def test_build_show_tables_script_first_db_creates_file():
-    """Il primo DB usa > (crea il file), i successivi >>."""
-    cfg = {"host": "hs2.example.com", "port": 10000}
-    script = _build_show_tables_script(cfg, ["db1", "db2"], "hadoop")
-    lines = script.splitlines()
-    # La prima printf deve usare >, le successive >>
-    first_printf = next(l for l in lines if "###DB:db1###" in l)
-    assert '> "$_HS_F"' in first_printf or "> \"$_HS_F\"" in first_printf
-    second_printf = next(l for l in lines if "###DB:db2###" in l)
-    assert '>>' in second_printf
+def test_build_show_tables_sql_markers_and_statements():
+    """SQL contiene i marker DB e SHOW TABLES per ogni DB."""
+    sql = _build_show_tables_sql(["db1", "db2", "db3"])
+    assert "SELECT '###DB:db1###'" in sql
+    assert "SELECT '###DB:db2###'" in sql
+    assert "SELECT '###DB:db3###'" in sql
+    assert "SHOW TABLES IN db1" in sql
+    assert "SHOW TABLES IN db2" in sql
+    assert "SHOW TABLES IN db3" in sql
+    # Puro SQL, nessun comando shell
+    assert "mktemp" not in sql
+    assert "printf" not in sql
+    assert "beeline" not in sql
+
+
+def test_build_show_tables_sql_empty():
+    sql = _build_show_tables_sql([])
+    assert sql == ""
 
 
 def test_parse_show_tables_output_normal():
@@ -1488,46 +1487,42 @@ def test_parse_show_tables_output_empty_db():
     assert result == {"emptydb": []}
 
 
-def test_build_show_partitions_script_one_beeline_call():
-    """Una sola invocazione beeline --force -f per tutte le tabelle di tutti i DB."""
-    cfg = {"host": "hs2.example.com", "port": 10000, "user": "hive"}
+def test_build_show_partitions_sql_markers_and_statements():
+    """SQL contiene i marker DB/TAB e SHOW PARTITIONS per ogni tabella."""
     db_tables = {"db1": ["tbl_a", "tbl_b"], "db2": ["tbl_c"]}
-    script = _build_show_partitions_script(cfg, db_tables, "hadoop")
+    sql = _build_show_partitions_sql(db_tables)
     # Marker DB
-    assert "###DB:db1###" in script
-    assert "###DB:db2###" in script
+    assert "SELECT '###DB:db1###'" in sql
+    assert "SELECT '###DB:db2###'" in sql
     # Marker TAB
-    assert "###TAB:tbl_a###" in script
-    assert "###TAB:tbl_b###" in script
-    assert "###TAB:tbl_c###" in script
+    assert "SELECT '###TAB:tbl_a###'" in sql
+    assert "SELECT '###TAB:tbl_b###'" in sql
+    assert "SELECT '###TAB:tbl_c###'" in sql
     # SHOW PARTITIONS per ogni tabella
-    assert "SHOW PARTITIONS db1.tbl_a" in script
-    assert "SHOW PARTITIONS db1.tbl_b" in script
-    assert "SHOW PARTITIONS db2.tbl_c" in script
-    # Una sola chiamata beeline --force -f
-    assert "--force -f" in script
-    assert script.count("--force -f") == 1
-    # Debug SQL file su stderr
-    assert "=== SQL FILE ===" in script
-    assert "cat \"$_HS_F\" >&2" in script or 'cat "$_HS_F" >&2' in script
+    assert "SHOW PARTITIONS db1.tbl_a" in sql
+    assert "SHOW PARTITIONS db1.tbl_b" in sql
+    assert "SHOW PARTITIONS db2.tbl_c" in sql
+    # Puro SQL, nessun comando shell
+    assert "mktemp" not in sql
+    assert "printf" not in sql
+    assert "beeline" not in sql
 
 
-def test_build_show_partitions_script_sorted_output():
+def test_build_show_partitions_sql_sorted_output():
     """DB e tabelle sono ordinati alfabeticamente per output deterministico."""
-    cfg = {"host": "hs2.example.com", "port": 10000}
     db_tables = {"zdb": ["z_tbl", "a_tbl"], "adb": ["m_tbl"]}
-    script = _build_show_partitions_script(cfg, db_tables, "hadoop")
+    sql = _build_show_partitions_sql(db_tables)
     # adb deve venire prima di zdb
-    pos_adb = script.index("###DB:adb###")
-    pos_zdb = script.index("###DB:zdb###")
+    pos_adb = sql.index("###DB:adb###")
+    pos_zdb = sql.index("###DB:zdb###")
     assert pos_adb < pos_zdb
     # a_tbl deve venire prima di z_tbl
-    pos_atbl = script.index("###TAB:a_tbl###")
-    pos_ztbl = script.index("###TAB:z_tbl###")
+    pos_atbl = sql.index("###TAB:a_tbl###")
+    pos_ztbl = sql.index("###TAB:z_tbl###")
     assert pos_atbl < pos_ztbl
 
 
-def test_parse_partition_output_compatible_with_show_partitions_script():
+def test_parse_partition_output_compatible_with_show_partitions_sql():
     """_parse_partition_output legge correttamente l'output del nuovo script."""
     # Simula output beeline tsv2 da _build_show_partitions_script:
     # SELECT '###DB:db###' -> _c0 / ###DB:db###
@@ -1631,15 +1626,16 @@ if __name__ == "__main__":
         test_hive_partition_no_threshold,
         test_hive_partition_default_timeout,
         test_hive_partition_custom_timeout,
-        test_build_show_tables_script_one_beeline_call,
-        test_build_show_tables_script_first_db_creates_file,
+        test_build_beeline_conn_contains_url_and_auth,
+        test_build_show_tables_sql_markers_and_statements,
+        test_build_show_tables_sql_empty,
         test_parse_show_tables_output_normal,
         test_parse_show_tables_output_empty,
         test_parse_show_tables_output_skips_headers,
         test_parse_show_tables_output_empty_db,
-        test_build_show_partitions_script_one_beeline_call,
-        test_build_show_partitions_script_sorted_output,
-        test_parse_partition_output_compatible_with_show_partitions_script,
+        test_build_show_partitions_sql_markers_and_statements,
+        test_build_show_partitions_sql_sorted_output,
+        test_parse_partition_output_compatible_with_show_partitions_sql,
     ]
     failed = 0
     for t in tests:

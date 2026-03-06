@@ -354,23 +354,12 @@ def _build_partition_query_script(hive_cfg, databases, default_user):
     return "\n".join(lines)
 
 
-def _build_show_tables_script(hive_cfg, databases, default_user):
-    # type: (dict, list, str) -> str
-    """Build shell script to SHOW TABLES for all DBs in ONE beeline session.
+def _build_beeline_conn(hive_cfg, default_user):
+    # type: (dict, str) -> str
+    """Build beeline connection string senza query/file args.
 
-    Riduce N connessioni beeline (vecchio approccio) a 1 connessione totale.
-    Costruisce un SQL tmpfile con SELECT '###DB:dbname###'; SHOW TABLES IN db;
-    per ogni database, poi esegue un'unica sessione beeline con --force -f.
-
-    Output (stdout Ansible), parsato da _parse_show_tables_output():
-      _c0
-      ###DB:db1###
-      tab_name
-      table1
-      table2
-      _c0
-      ###DB:db2###
-      ...
+    Usato da _run_playbook_with_sql per costruire il comando shell breve
+    (beeline -u ... --force -f <remote_file>) che non supera ARG_MAX.
     """
     beeline  = hive_cfg.get("beeline_path", "beeline")
     url      = _build_beeline_url(hive_cfg)
@@ -380,31 +369,35 @@ def _build_show_tables_script(hive_cfg, databases, default_user):
         auth_str = "-n '" + user + "' -p '" + pwd + "'"
     else:
         auth_str = "-n '" + user + "'"
-    conn = beeline + ' -u "' + url + '" ' + auth_str + " --silent=true --outputformat=tsv2"
+    return beeline + ' -u "' + url + '" ' + auth_str + " --silent=true --outputformat=tsv2"
 
-    lines = [
-        '_HS_F=$(mktemp /tmp/hs_XXXXXX.sql 2>/dev/null || echo "/tmp/hs_$$.sql")',
-    ]
-    first = True
+
+def _build_show_tables_sql(databases):
+    # type: (list) -> str
+    """Build SQL content per SHOW TABLES su tutti i DB (da copiare via Ansible copy).
+
+    Formato output beeline tsv2, parsato da _parse_show_tables_output():
+      _c0
+      ###DB:db1###
+      tab_name
+      table1
+      table2
+      _c0
+      ###DB:db2###
+      ...
+    """
+    lines = []
     for db in databases:
-        redirect = ">" if first else ">>"
-        first = False
-        lines.append(
-            "printf '%s\\n' \"SELECT '###DB:" + db + "###';\" " + redirect + " \"$_HS_F\""
-        )
-        lines.append(
-            "printf '%s\\n' \"SHOW TABLES IN " + db + ";\" >> \"$_HS_F\""
-        )
-    lines.append(conn + " --force -f \"$_HS_F\" 2>/dev/null || true")
-    lines.append('rm -f "$_HS_F"')
+        lines.append("SELECT '###DB:{}###';".format(db))
+        lines.append("SHOW TABLES IN {};".format(db))
     return "\n".join(lines)
 
 
 def _parse_show_tables_output(output):
     # type: (str) -> dict
-    """Parse output from _build_show_tables_script.
+    """Parse output from _build_show_tables_sql (via beeline tsv2).
 
-    Formato atteso (beeline tsv2):
+    Formato atteso:
       _c0
       ###DB:db1###
       tab_name
@@ -433,57 +426,19 @@ def _parse_show_tables_output(output):
     return result
 
 
-def _build_show_partitions_script(hive_cfg, db_tables, default_user):
-    # type: (dict, dict, str) -> str
-    """Build shell script to SHOW PARTITIONS for all tables in ONE beeline session.
+def _build_show_partitions_sql(db_tables):
+    # type: (dict) -> str
+    """Build SQL content per SHOW PARTITIONS su tutte le tabelle di tutti i DB.
 
     db_tables: {db: [table1, table2, ...]} da _parse_show_tables_output.
-    Riduce N×M connessioni beeline (vecchio approccio) a 1 connessione totale.
-
-    Costruisce un SQL tmpfile con:
-      SELECT '###DB:dbname###';
-      SELECT '###TAB:tablename###';
-      SHOW PARTITIONS db.table;
-      ...
-    ed esegue un'unica sessione beeline con --force -f.
-
-    Output parsato da _parse_partition_output() (stesso formato del vecchio approccio).
+    Output parsato da _parse_partition_output().
     """
-    beeline  = hive_cfg.get("beeline_path", "beeline")
-    url      = _build_beeline_url(hive_cfg)
-    user     = hive_cfg.get("user", default_user)
-    pwd      = hive_cfg.get("password")
-    if pwd:
-        auth_str = "-n '" + user + "' -p '" + pwd + "'"
-    else:
-        auth_str = "-n '" + user + "'"
-    conn = beeline + ' -u "' + url + '" ' + auth_str + " --silent=true --outputformat=tsv2"
-
-    lines = [
-        '_HS_F=$(mktemp /tmp/hs_XXXXXX.sql 2>/dev/null || echo "/tmp/hs_$$.sql")',
-    ]
-    first = True
+    lines = []
     for db in sorted(db_tables):
-        tables = db_tables[db]
-        redirect = ">" if first else ">>"
-        first = False
-        lines.append(
-            "printf '%s\\n' \"SELECT '###DB:" + db + "###';\" " + redirect + " \"$_HS_F\""
-        )
-        for tbl in sorted(tables):
-            lines.append(
-                "printf '%s\\n' \"SELECT '###TAB:" + tbl + "###';\" >> \"$_HS_F\""
-            )
-            lines.append(
-                "printf '%s\\n' \"SHOW PARTITIONS " + db + "." + tbl + ";\" >> \"$_HS_F\""
-            )
-    lines.append('if [ -s "$_HS_F" ]; then')
-    lines.append('    echo "=== SQL FILE ===" >&2')
-    lines.append('    cat "$_HS_F" >&2')
-    lines.append('    echo "=== END SQL FILE ===" >&2')
-    lines.append('    ' + conn + ' --force -f "$_HS_F" 2>/dev/null || true')
-    lines.append('fi')
-    lines.append('rm -f "$_HS_F"')
+        lines.append("SELECT '###DB:{}###';".format(db))
+        for tbl in sorted(db_tables[db]):
+            lines.append("SELECT '###TAB:{}###';".format(tbl))
+            lines.append("SHOW PARTITIONS {}.{};".format(db, tbl))
     return "\n".join(lines)
 
 
@@ -732,6 +687,131 @@ class HiveCheck(CheckBase):
                     except OSError:
                         pass
 
+    def _run_playbook_with_sql(self, ansible_bin, inventory_content,
+                               sql_content, conn_str,
+                               tag="HiveCheck", kinit_cmd=None, timeout=60):
+        # type: (str, str, str, str, str, object, int) -> tuple
+        """Run beeline -f <sql_file> con il SQL copiato sull'edge node via Ansible copy.
+
+        Evita [Errno 7] Argument list too long: il contenuto SQL viene trasferito
+        tramite il modulo Ansible copy (nessun limite di dimensione), e il blocco
+        shell: contiene solo il breve comando beeline -f.
+
+        sql_content: contenuto del file SQL (arbitrariamente grande)
+        conn_str: stringa di connessione beeline (beeline -u ... auth opts)
+
+        Returns (rc, stdout, stderr) — stesso formato di _run_playbook.
+        """
+        import random
+        remote_sql = "/tmp/hs_{}.sql".format(random.randint(100000, 999999))
+
+        # Debug: logga il SQL localmente (non serve cat >&2 nel playbook)
+        _debug.section(tag, "SQL file content ({} lines)".format(
+            len(sql_content.splitlines())))
+        _debug.log(tag, sql_content, multiline=True)
+
+        # Shell block breve: solo kinit (opzionale) + beeline -f
+        script_parts = []
+        if kinit_cmd:
+            script_parts.append(kinit_cmd)
+        script_parts.append(
+            conn_str + " --force -f " + remote_sql + " 2>/dev/null || true"
+        )
+        shell_lines = "\n".join("        " + l for l in script_parts)
+
+        # Indenta SQL per YAML block scalar (copy.content: |)
+        # content: è a 8 spazi → content lines a 10 spazi (YAML strip 10)
+        sql_indented = "\n".join("          " + l for l in sql_content.splitlines())
+        if sql_indented:
+            sql_indented += "\n"
+
+        playbook = (
+            "---\n"
+            "- name: HiveCheck\n"
+            "  hosts: all\n"
+            "  gather_facts: false\n"
+            "  tasks:\n"
+            "    - name: Copy SQL file\n"
+            "      copy:\n"
+            "        content: |\n"
+            "{sql_indented}"
+            "        dest: {remote_sql}\n"
+            "    - name: Beeline test\n"
+            "      shell: |\n"
+            "{shell_lines}\n"
+            "      register: r\n"
+            "    - name: Cleanup SQL file\n"
+            "      file:\n"
+            "        path: {remote_sql}\n"
+            "        state: absent\n"
+            "    - debug: var=r.stdout\n"
+            "    - debug: var=r.stderr\n"
+        ).format(
+            sql_indented=sql_indented,
+            remote_sql=remote_sql,
+            shell_lines=shell_lines,
+        )
+
+        inv_path = play_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode='w', suffix='.ini', delete=False, prefix='hs_inv_'
+            ) as f:
+                f.write(inventory_content)
+                inv_path = f.name
+
+            with tempfile.NamedTemporaryFile(
+                mode='w', suffix='.yml', delete=False, prefix='hs_hive_'
+            ) as f:
+                f.write(playbook)
+                play_path = f.name
+
+            _debug.log(tag, "playbook (with_sql): {}".format(play_path))
+            _debug.section(tag, "playbook content")
+            _debug.log(tag, playbook, multiline=True)
+
+            env = os.environ.copy()
+            env["ANSIBLE_HOST_KEY_CHECKING"] = "False"
+
+            proc = subprocess.Popen(
+                [ansible_bin, "-i", inv_path, play_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env
+            )
+            stdout, stderr = proc.communicate(timeout=timeout)
+            out = stdout.decode("utf-8", errors="replace")
+            err = stderr.decode("utf-8", errors="replace")
+            _debug.log(tag, "rc: {}".format(proc.returncode))
+            _debug.section(tag, "ansible stdout")
+            _debug.log(tag, out if out.strip() else "(empty)", multiline=True)
+            r_stdout = _extract_stdout(out)
+            r_stderr = _extract_stderr(out)
+            if r_stdout.strip():
+                _debug.section(tag, "r.stdout (beeline output)")
+                _debug.log(tag, r_stdout, multiline=True)
+            else:
+                _debug.log(tag, "r.stdout: (empty)")
+            if r_stderr.strip():
+                _debug.section(tag, "r.stderr")
+                _debug.log(tag, r_stderr, multiline=True)
+            if err.strip():
+                _debug.section(tag, "ansible process stderr")
+                _debug.log(tag, err, multiline=True)
+            return (proc.returncode, out, err)
+
+        except subprocess.TimeoutExpired:
+            return -1, "", "timeout after {}s".format(timeout)
+        except Exception as e:
+            return -2, "", str(e)
+        finally:
+            for p in (inv_path, play_path):
+                if p and os.path.exists(p):
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
+
     def _find_ansible(self):
         # type: () -> str
         """Trova il binary ansible da caps o dal PATH."""
@@ -828,11 +908,14 @@ class HivePartitionCheck(HiveCheck):
                 )
             kinit_cmd = None  # già eseguito, non ripetere
 
+        # Stringa di connessione beeline (usata in Step 2 e 3)
+        conn_str = _build_beeline_conn(hive_cfg, ssh_user)
+
         # Step 2: SHOW TABLES per tutti i DB — UNA sessione beeline
-        # (riduce N connessioni a 1 rispetto al vecchio approccio per-DB)
-        script = _build_show_tables_script(hive_cfg, databases, ssh_user)
-        rc, out, err = self._run_playbook(
-            ansible_bin, inventory, script,
+        # SQL copiato via Ansible copy (evita ARG_MAX per script shell grandi)
+        sql = _build_show_tables_sql(databases)
+        rc, out, err = self._run_playbook_with_sql(
+            ansible_bin, inventory, sql, conn_str,
             tag="HivePartitionCheck.show_tables",
             kinit_cmd=kinit_cmd,
             timeout=play_timeout
@@ -858,10 +941,10 @@ class HivePartitionCheck(HiveCheck):
             )
 
         # Step 3: SHOW PARTITIONS per tutte le tabelle — UNA sessione beeline
-        # (riduce N×M connessioni a 1 rispetto al vecchio approccio per-DB)
-        script = _build_show_partitions_script(hive_cfg, db_tables, ssh_user)
-        rc, out, err = self._run_playbook(
-            ansible_bin, inventory, script,
+        # SQL copiato via Ansible copy (evita ARG_MAX per ambienti con molte tabelle)
+        sql = _build_show_partitions_sql(db_tables)
+        rc, out, err = self._run_playbook_with_sql(
+            ansible_bin, inventory, sql, conn_str,
             tag="HivePartitionCheck",
             kinit_cmd=None,
             timeout=play_timeout
