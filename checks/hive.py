@@ -317,29 +317,11 @@ def _build_db_discovery_cmd(hive_cfg, default_user):
 
 def _build_partition_query_script(hive_cfg, databases, default_user):
     # type: (dict, list, str) -> str
-    """Build multi-command shell script to count partitions per table for each DB.
+    """Build multi-command shell script — LEGACY, 2×N sessioni beeline.
 
-    Per ogni DB:
-      1. SHOW TABLES IN <db> — recupera la lista tabelle (1 connessione beeline)
-      2. Costruisce un file SQL temporaneo con SELECT '###TAB:xxx###' + SHOW PARTITIONS
-         per ogni tabella, poi lo esegue in un'unica sessione beeline (1 connessione)
-
-    Totale: 2 connessioni beeline per DB, indipendentemente dal numero di tabelle.
-
-    Evita information_schema.partitions che su CDP con Ranger può restituire 0 righe
-    anche quando le partizioni esistono.
-
-    Output (stdout Ansible):
-      ###DB:dbname###
-      _c0
-      ###TAB:table1###
-      partition
-      dt=20260101/field=val
-      ...
-      _c0
-      ###TAB:table2###
-      ...
-    Parsato da _parse_partition_output().
+    Deprecato: usa _build_show_tables_script + _build_show_partitions_script
+    che riducono le connessioni a 2 totali (1 per SHOW TABLES, 1 per SHOW PARTITIONS).
+    Mantenuto per retrocompatibilità con i test esistenti.
     """
     beeline = hive_cfg.get("beeline_path", "beeline")
     url     = _build_beeline_url(hive_cfg)
@@ -354,9 +336,7 @@ def _build_partition_query_script(hive_cfg, databases, default_user):
     lines = []
     for db in databases:
         lines.append('echo "###DB:' + db + '###"')
-        # Crea file SQL temporaneo
         lines.append('_HS_F=$(mktemp /tmp/hs_XXXXXX.sql 2>/dev/null || echo "/tmp/hs_$$.sql")')
-        # Popola il file: per ogni tabella un marker SELECT + SHOW PARTITIONS
         lines.append(
             'for _tbl in $(' + conn + ' -e "SHOW TABLES IN ' + db + ';" 2>/dev/null'
             ' | grep -v "^tab_name$" | grep -v "^$"); do'
@@ -364,16 +344,146 @@ def _build_partition_query_script(hive_cfg, databases, default_user):
         lines.append("    printf \"SELECT '###TAB:%s###';\\n\" \"$_tbl\" >> \"$_HS_F\"")
         lines.append('    printf "SHOW PARTITIONS ' + db + '.%s;\\n" "$_tbl" >> "$_HS_F"')
         lines.append('done')
-        # Esegui tutto in una singola sessione beeline
         lines.append('if [ -s "$_HS_F" ]; then')
-        # Manda il contenuto del file SQL su stderr (visibile in r.stderr Ansible, --debug)
         lines.append('    echo "=== SQL FILE [' + db + '] ===" >&2')
         lines.append('    cat "$_HS_F" >&2')
         lines.append('    echo "=== END SQL FILE ===" >&2')
-        # --force: continua l'esecuzione anche su SHOW PARTITIONS di tabelle non partizionate
         lines.append('    ' + conn + ' --force -f "$_HS_F" 2>/dev/null || true')
         lines.append('fi')
         lines.append('rm -f "$_HS_F"')
+    return "\n".join(lines)
+
+
+def _build_show_tables_script(hive_cfg, databases, default_user):
+    # type: (dict, list, str) -> str
+    """Build shell script to SHOW TABLES for all DBs in ONE beeline session.
+
+    Riduce N connessioni beeline (vecchio approccio) a 1 connessione totale.
+    Costruisce un SQL tmpfile con SELECT '###DB:dbname###'; SHOW TABLES IN db;
+    per ogni database, poi esegue un'unica sessione beeline con --force -f.
+
+    Output (stdout Ansible), parsato da _parse_show_tables_output():
+      _c0
+      ###DB:db1###
+      tab_name
+      table1
+      table2
+      _c0
+      ###DB:db2###
+      ...
+    """
+    beeline  = hive_cfg.get("beeline_path", "beeline")
+    url      = _build_beeline_url(hive_cfg)
+    user     = hive_cfg.get("user", default_user)
+    pwd      = hive_cfg.get("password")
+    if pwd:
+        auth_str = "-n '" + user + "' -p '" + pwd + "'"
+    else:
+        auth_str = "-n '" + user + "'"
+    conn = beeline + ' -u "' + url + '" ' + auth_str + " --silent=true --outputformat=tsv2"
+
+    lines = [
+        '_HS_F=$(mktemp /tmp/hs_XXXXXX.sql 2>/dev/null || echo "/tmp/hs_$$.sql")',
+    ]
+    first = True
+    for db in databases:
+        redirect = ">" if first else ">>"
+        first = False
+        lines.append(
+            "printf '%s\\n' \"SELECT '###DB:" + db + "###';\" " + redirect + " \"$_HS_F\""
+        )
+        lines.append(
+            "printf '%s\\n' \"SHOW TABLES IN " + db + ";\" >> \"$_HS_F\""
+        )
+    lines.append(conn + " --force -f \"$_HS_F\" 2>/dev/null || true")
+    lines.append('rm -f "$_HS_F"')
+    return "\n".join(lines)
+
+
+def _parse_show_tables_output(output):
+    # type: (str) -> dict
+    """Parse output from _build_show_tables_script.
+
+    Formato atteso (beeline tsv2):
+      _c0
+      ###DB:db1###
+      tab_name
+      table1
+      table2
+      _c0
+      ###DB:db2###
+      tab_name
+      table3
+
+    Returns {db: [table1, table2, ...]}.
+    """
+    SKIP = {"_c0", "tab_name", ""}
+    result = {}      # type: dict
+    current_db = None
+    for raw in output.splitlines():
+        line = raw.strip()
+        if line in SKIP:
+            continue
+        if line.startswith("###DB:") and line.endswith("###"):
+            current_db = line[6:-3]
+            result[current_db] = []
+            continue
+        if current_db is not None:
+            result[current_db].append(line)
+    return result
+
+
+def _build_show_partitions_script(hive_cfg, db_tables, default_user):
+    # type: (dict, dict, str) -> str
+    """Build shell script to SHOW PARTITIONS for all tables in ONE beeline session.
+
+    db_tables: {db: [table1, table2, ...]} da _parse_show_tables_output.
+    Riduce N×M connessioni beeline (vecchio approccio) a 1 connessione totale.
+
+    Costruisce un SQL tmpfile con:
+      SELECT '###DB:dbname###';
+      SELECT '###TAB:tablename###';
+      SHOW PARTITIONS db.table;
+      ...
+    ed esegue un'unica sessione beeline con --force -f.
+
+    Output parsato da _parse_partition_output() (stesso formato del vecchio approccio).
+    """
+    beeline  = hive_cfg.get("beeline_path", "beeline")
+    url      = _build_beeline_url(hive_cfg)
+    user     = hive_cfg.get("user", default_user)
+    pwd      = hive_cfg.get("password")
+    if pwd:
+        auth_str = "-n '" + user + "' -p '" + pwd + "'"
+    else:
+        auth_str = "-n '" + user + "'"
+    conn = beeline + ' -u "' + url + '" ' + auth_str + " --silent=true --outputformat=tsv2"
+
+    lines = [
+        '_HS_F=$(mktemp /tmp/hs_XXXXXX.sql 2>/dev/null || echo "/tmp/hs_$$.sql")',
+    ]
+    first = True
+    for db in sorted(db_tables):
+        tables = db_tables[db]
+        redirect = ">" if first else ">>"
+        first = False
+        lines.append(
+            "printf '%s\\n' \"SELECT '###DB:" + db + "###';\" " + redirect + " \"$_HS_F\""
+        )
+        for tbl in sorted(tables):
+            lines.append(
+                "printf '%s\\n' \"SELECT '###TAB:" + tbl + "###';\" >> \"$_HS_F\""
+            )
+            lines.append(
+                "printf '%s\\n' \"SHOW PARTITIONS " + db + "." + tbl + ";\" >> \"$_HS_F\""
+            )
+    lines.append('if [ -s "$_HS_F" ]; then')
+    lines.append('    echo "=== SQL FILE ===" >&2')
+    lines.append('    cat "$_HS_F" >&2')
+    lines.append('    echo "=== END SQL FILE ===" >&2')
+    lines.append('    ' + conn + ' --force -f "$_HS_F" 2>/dev/null || true')
+    lines.append('fi')
+    lines.append('rm -f "$_HS_F"')
     return "\n".join(lines)
 
 
@@ -718,12 +828,42 @@ class HivePartitionCheck(HiveCheck):
                 )
             kinit_cmd = None  # già eseguito, non ripetere
 
-        # Step 2: conteggio partizioni per tabella per ogni DB
-        script = _build_partition_query_script(hive_cfg, databases, ssh_user)
+        # Step 2: SHOW TABLES per tutti i DB — UNA sessione beeline
+        # (riduce N connessioni a 1 rispetto al vecchio approccio per-DB)
+        script = _build_show_tables_script(hive_cfg, databases, ssh_user)
+        rc, out, err = self._run_playbook(
+            ansible_bin, inventory, script,
+            tag="HivePartitionCheck.show_tables",
+            kinit_cmd=kinit_cmd,
+            timeout=play_timeout
+        )
+        if rc != 0:
+            task_err = _extract_task_error(out)
+            return CheckResult(
+                name="HivePartitionCheck",
+                status=CheckResult.UNKNOWN,
+                message="Failed to list tables (rc={}): {}".format(rc, task_err[:200])
+            )
+        raw = _extract_stdout(out)
+        db_tables = _parse_show_tables_output(raw)
+        kinit_cmd = None  # già eseguito in Step 1 o 2
+        _debug.log("HivePartitionCheck",
+                   "tables per db: {}".format(
+                       {db: len(tbls) for db, tbls in db_tables.items()}))
+        if not db_tables:
+            return CheckResult(
+                name="HivePartitionCheck",
+                status=CheckResult.UNKNOWN,
+                message="No tables found — check beeline output"
+            )
+
+        # Step 3: SHOW PARTITIONS per tutte le tabelle — UNA sessione beeline
+        # (riduce N×M connessioni a 1 rispetto al vecchio approccio per-DB)
+        script = _build_show_partitions_script(hive_cfg, db_tables, ssh_user)
         rc, out, err = self._run_playbook(
             ansible_bin, inventory, script,
             tag="HivePartitionCheck",
-            kinit_cmd=kinit_cmd,
+            kinit_cmd=None,
             timeout=play_timeout
         )
         if rc != 0:
