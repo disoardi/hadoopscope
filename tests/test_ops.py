@@ -8,6 +8,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from checks.yarn import _resolve_url
+from checks.base import CheckResult
+from ops.base import OpsParam, OpsToolBase
 
 
 def test_resolve_url_singular_key():
@@ -35,12 +37,62 @@ def test_resolve_url_missing_returns_none():
     assert is_auto is True
 
 
+def test_ops_param_defaults():
+    p = OpsParam("app_id", help="YARN application id")
+    assert p.name == "app_id"
+    assert p.help == "YARN application id"
+    assert p.required is True
+    assert p.type is str
+
+
+def test_ops_tool_base_can_run_no_requires():
+    class _NoRequires(OpsToolBase):
+        name = "noop"
+        requires = []
+        def run(self, **kwargs):
+            return CheckResult("noop", CheckResult.OK, "ok")
+    assert _NoRequires({}, {}).can_run() is True
+
+
+def test_ops_tool_base_can_run_missing_cap():
+    class _NeedsAnsible(OpsToolBase):
+        name = "needs-ansible"
+        requires = [["ansible"]]
+        def run(self, **kwargs):
+            return CheckResult("x", CheckResult.OK, "ok")
+    assert _NeedsAnsible({}, {}).can_run() is False
+    assert _NeedsAnsible({}, {"ansible": True}).can_run() is True
+
+
+def test_ops_tool_base_run_raises_not_implemented():
+    class Bad(OpsToolBase):
+        name = "bad"
+    try:
+        Bad({}, {}).run()
+        assert False, "should raise"
+    except NotImplementedError:
+        pass
+
+
+def test_ops_tool_base_is_write_default_false():
+    class _Tool(OpsToolBase):
+        name = "x"
+        def run(self, **kwargs):
+            return CheckResult("x", CheckResult.OK, "ok")
+    assert _Tool({}, {}).is_write is False
+
+
 if __name__ == "__main__":
     tests = [
         test_resolve_url_singular_key,
         test_resolve_url_plural_key_takes_first,
         test_resolve_url_plural_wins_over_singular,
         test_resolve_url_missing_returns_none,
+        test_ops_param_defaults,
+        test_ops_tool_base_can_run_no_requires,
+        test_ops_tool_base_can_run_missing_cap,
+        test_ops_tool_base_run_raises_not_implemented,
+        test_ops_tool_base_is_write_default_false,
     ]
     failed = 0
     for t in tests:
