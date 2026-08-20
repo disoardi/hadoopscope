@@ -505,11 +505,11 @@ class HdfsSpaceCheck(CheckBase):
                         "capacity_total_bytes":     total,
                         "capacity_used_bytes":      used,
                         "capacity_remaining_bytes": remaining,
-                        "used_pct":                 round(pct, 1),
+                        "used_pct":                 round(pct, 2),
                     }
                     if len(namenode_urls) > 1:
                         global_details["namenode_url_used"] = used_nn_url
-                    global_msg = "HDFS used: {} / {} ({:.1f}%)".format(
+                    global_msg = "HDFS used: {} / {} ({:.2f}%)".format(
                         _human(used), _human(total), pct)
                     if pct >= crit_pct:
                         global_status = CheckResult.CRITICAL
@@ -566,7 +566,7 @@ class HdfsSpaceCheck(CheckBase):
                 quota_details[path] = {
                     "used_bytes":  used,
                     "quota_bytes": quota,
-                    "used_pct":    round(pct, 1),
+                    "used_pct":    round(pct, 2),
                 }
                 if pct >= p_crit:
                     quota_issues.append((CheckResult.CRITICAL, path, pct))

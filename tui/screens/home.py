@@ -69,7 +69,7 @@ class HomeGridScreen(Screen):
                 line_y = y + 5
                 if entry["hdfs"] and entry["hdfs"].get("used_pct") is not None:
                     safe_addstr(stdscr, line_y, x + 2,
-                               "HDFS: {:.0f}% usato".format(entry["hdfs"]["used_pct"])[:col_w - 4])
+                               "HDFS: {:.2f}% usato".format(entry["hdfs"]["used_pct"])[:col_w - 4])
                     line_y += 1
                 if entry["yarn"]:
                     safe_addstr(stdscr, line_y, x + 2,
