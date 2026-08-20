@@ -67,6 +67,22 @@ python3 hadoopscope.py --env prod-hdp --dry-run
 python3 hadoopscope.py --show-capabilities
 ```
 
+## TUI interattiva
+
+```bash
+python3 -m tui.app config/hadoopscope.yaml
+```
+
+Navigazione 100% da tastiera, tre sezioni sempre accessibili dalla
+sidebar (`Tab` per cambiare sezione, `ESC` per tornare indietro/uscire):
+
+- **Home** — stato riassuntivo di tutti i cluster configurati, Invio su
+  una card per il dettaglio per servizio
+- **Monitoring** — esegui check on-demand (con opzione di schedularli via
+  crontab) o gestisci i check già schedulati
+- **Ops** — tool operativi on-demand (es. status/log di un'applicazione
+  YARN dato l'application id)
+
 ## Feature Matrix
 
 | Check | Category | Requires | Description |
