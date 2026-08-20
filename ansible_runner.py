@@ -29,16 +29,22 @@ def find_ansible_bin():
 
 def build_inventory(edge_host, ssh_user, ssh_key):
     # type: (str, str, str) -> str
-    """Inventory Ansible single-host generato al volo (mai un file statico)."""
+    """Inventory Ansible single-host generato al volo (mai un file statico).
+
+    Se ssh_key non è configurata, NON forza un path di default: lascia che
+    SSH risolva l'identità da solo (ssh-agent, chiavi caricate via 1Password
+    o simili, ~/.ssh/config Host alias) invece di puntare esplicitamente a
+    un file che potrebbe non esistere — forzare '-i ~/.ssh/id_rsa' su un
+    utente che usa un agent fa fallire l'autenticazione con 'no such
+    identity' invece di lasciar provare l'agent.
+    """
     if edge_host in ("localhost", "127.0.0.1", "::1"):
         return "localhost ansible_connection=local"
-    return (
-        "{host} ansible_user={user} ansible_ssh_private_key_file={key}"
-    ).format(
-        host=edge_host,
-        user=ssh_user,
-        key=ssh_key or "~/.ssh/id_rsa"
-    )
+    if ssh_key:
+        return (
+            "{host} ansible_user={user} ansible_ssh_private_key_file={key}"
+        ).format(host=edge_host, user=ssh_user, key=ssh_key)
+    return "{host} ansible_user={user}".format(host=edge_host, user=ssh_user)
 
 
 def extract_task_error(ansible_stdout):
@@ -97,6 +103,14 @@ def run_playbook(ansible_bin, inventory_content, shell_cmd,
     # type: (str, str, str, str, object, int) -> tuple
     """Run Ansible playbook with optional kinit + shell command.
 
+    Usa il modulo 'raw' invece di 'shell': raw esegue il comando via SSH
+    senza passare dal sistema di moduli Python di Ansible (AnsiballZ),
+    quindi non richiede nessuna versione minima di Python sull'edge node —
+    fondamentale perché il Python remoto varia molto tra i cluster clienti
+    (2.7 su HDP vecchi, 3.6 su alcuni CDP, 3.8+ su altri) e ansible-core
+    recente (2.14+) sul controller ha smesso di supportare target con
+    Python < 3.8 per i moduli standard. 'raw' aggira il problema del tutto.
+
     kinit_cmd: if set, a 'kinit -kt <keytab> <principal>' command run on the
     edge node BEFORE shell_cmd. Both keytab and principal must be paths/values
     on the edge node, not on the machine running hadoopscope.
@@ -122,7 +136,7 @@ def run_playbook(ansible_bin, inventory_content, shell_cmd,
         "  gather_facts: false\n"
         "  tasks:\n"
         "    - name: shell command\n"
-        "      shell: |\n"
+        "      raw: |\n"
         "{shell_lines}\n"
         "      register: r\n"
         "    - debug: var=r.stdout\n"
