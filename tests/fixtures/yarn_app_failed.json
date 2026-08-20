@@ -1,0 +1,19 @@
+{
+  "app": {
+    "id": "application_1699999999999_0003",
+    "user": "hdfs",
+    "name": "example-job-3",
+    "queue": "default",
+    "state": "FAILED",
+    "finalStatus": "FAILED",
+    "progress": 100.0,
+    "applicationType": "SPARK",
+    "diagnostics": "Application failed 2 times due to AM Container exit code: 1",
+    "startedTime": 1699999999000,
+    "finishedTime": 1699999999500,
+    "elapsedTime": 500,
+    "allocatedMB": 0,
+    "allocatedVCores": 0,
+    "runningContainers": 0
+  }
+}

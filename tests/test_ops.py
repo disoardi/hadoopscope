@@ -10,6 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from checks.yarn import _resolve_url
 from checks.base import CheckResult
 from ops.base import OpsParam, OpsToolBase
+from ops.yarn_app import AppStatusTool
+from tests.test_checks import start_mock_server, load_fixture
 
 
 def test_resolve_url_singular_key():
@@ -82,6 +84,59 @@ def test_ops_tool_base_is_write_default_false():
     assert _Tool({}, {}).is_write is False
 
 
+def test_app_status_running():
+    fixture = load_fixture("yarn_app_running.json")
+    server, port = start_mock_server({
+        "/ws/v1/cluster/apps/application_1699999999999_0001": fixture,
+    })
+    try:
+        cfg = {"yarn": {"rm_url": "http://127.0.0.1:{}".format(port)}}
+        tool = AppStatusTool(config=cfg, caps={})
+        result = tool.run(app_id="application_1699999999999_0001")
+        assert result.status == CheckResult.OK
+        assert "RUNNING" in result.message
+        assert result.details["state"] == "RUNNING"
+        assert result.details["allocatedMB"] == 4096
+    finally:
+        server.shutdown()
+
+
+def test_app_status_succeeded():
+    fixture = load_fixture("yarn_app_succeeded.json")
+    server, port = start_mock_server({
+        "/ws/v1/cluster/apps/application_1699999999999_0002": fixture,
+    })
+    try:
+        cfg = {"yarn": {"rm_url": "http://127.0.0.1:{}".format(port)}}
+        tool = AppStatusTool(config=cfg, caps={})
+        result = tool.run(app_id="application_1699999999999_0002")
+        assert result.status == CheckResult.OK
+        assert result.details["finalStatus"] == "SUCCEEDED"
+    finally:
+        server.shutdown()
+
+
+def test_app_status_failed():
+    fixture = load_fixture("yarn_app_failed.json")
+    server, port = start_mock_server({
+        "/ws/v1/cluster/apps/application_1699999999999_0003": fixture,
+    })
+    try:
+        cfg = {"yarn": {"rm_url": "http://127.0.0.1:{}".format(port)}}
+        tool = AppStatusTool(config=cfg, caps={})
+        result = tool.run(app_id="application_1699999999999_0003")
+        assert result.status == CheckResult.CRITICAL
+        assert "AM Container exit code" in result.message
+    finally:
+        server.shutdown()
+
+
+def test_app_status_no_rm_url_configured():
+    tool = AppStatusTool(config={}, caps={})
+    result = tool.run(app_id="application_x")
+    assert result.status == CheckResult.SKIPPED
+
+
 if __name__ == "__main__":
     tests = [
         test_resolve_url_singular_key,
@@ -93,6 +148,10 @@ if __name__ == "__main__":
         test_ops_tool_base_can_run_missing_cap,
         test_ops_tool_base_run_raises_not_implemented,
         test_ops_tool_base_is_write_default_false,
+        test_app_status_running,
+        test_app_status_succeeded,
+        test_app_status_failed,
+        test_app_status_no_rm_url_configured,
     ]
     failed = 0
     for t in tests:
