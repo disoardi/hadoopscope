@@ -248,6 +248,42 @@ def test_app_status_kinit_falls_back_to_top_level_kerberos():
         server.shutdown()
 
 
+def test_app_status_counters_best_effort_when_configured():
+    app_fixture = load_fixture("yarn_app_succeeded_spark.json")
+    counters_fixture = load_fixture("spark_history_counters.json")
+    server, port = start_mock_server({
+        "/ws/v1/cluster/apps/application_1699999999999_0002": app_fixture,
+        "/api/v1/applications/application_1699999999999_0002": counters_fixture,
+    })
+    try:
+        base = "http://127.0.0.1:{}".format(port)
+        cfg = {"yarn": {"rm_url": base, "spark_history_url": base}}
+        tool = AppStatusTool(config=cfg, caps={})
+        result = tool.run(app_id="application_1699999999999_0002")
+        assert result.status == CheckResult.OK
+        assert "counters" in result.details
+        assert result.details["counters"]["attempts"][0]["duration"] == 15000
+    finally:
+        server.shutdown()
+
+
+def test_app_status_counters_not_available_when_not_configured():
+    app_fixture = load_fixture("yarn_app_succeeded.json")
+    server, port = start_mock_server({
+        "/ws/v1/cluster/apps/application_1699999999999_0002": app_fixture,
+    })
+    try:
+        base = "http://127.0.0.1:{}".format(port)
+        cfg = {"yarn": {"rm_url": base}}  # nessun spark_history_url
+        tool = AppStatusTool(config=cfg, caps={})
+        result = tool.run(app_id="application_1699999999999_0002")
+        assert result.status == CheckResult.OK
+        assert "counters non disponibili" in result.message
+        assert "counters" not in result.details
+    finally:
+        server.shutdown()
+
+
 if __name__ == "__main__":
     tests = [
         test_resolve_url_singular_key,
@@ -269,6 +305,8 @@ if __name__ == "__main__":
         test_app_status_kinit_called_when_kerberos_enabled,
         test_app_status_kinit_not_called_when_kerberos_disabled,
         test_app_status_kinit_falls_back_to_top_level_kerberos,
+        test_app_status_counters_best_effort_when_configured,
+        test_app_status_counters_not_available_when_not_configured,
     ]
     failed = 0
     for t in tests:

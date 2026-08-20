@@ -112,6 +112,41 @@ def _query_history_server(config, app_id, no_proxy, use_krb):
         return _normalize_history_hdp(app)
 
 
+_COUNTERS_CONFIG_KEY = {
+    "SPARK":      "spark_history_url",
+    "MAPREDUCE":  "mr_history_url",
+    "TEZ":        "tez_history_url",
+}
+
+
+def _fetch_counters_best_effort(config, app_id, app_type, no_proxy, use_krb):
+    # type: (dict, str, str, bool, bool) -> object
+    """Tenta il fetch dei counters per il tipo applicativo. None se non
+    configurato o se qualunque cosa fallisce — mai solleva."""
+    cfg_key = _COUNTERS_CONFIG_KEY.get(app_type)
+    if not cfg_key:
+        return None
+    yarn_cfg = config.get("yarn", {})
+    plural = cfg_key.replace("_url", "_urls")
+    history_url, _ = _resolve_url(yarn_cfg, cfg_key, plural)
+    if not history_url:
+        return None
+
+    if app_type == "SPARK":
+        path = "{}/api/v1/applications/{}".format(history_url, app_id)
+    else:
+        # MapReduce/Tez: mapping id->job id non standardizzato in questa
+        # prima versione, riservato a fast-follow se emerge un bisogno reale
+        return None
+
+    try:
+        data = _yarn_get(None, path, no_proxy=no_proxy, kerberos=use_krb,
+                         full_path=True)
+        return data
+    except IOError:
+        return None
+
+
 def _message_from_fields(app_id, fields):
     # type: (str, dict) -> str
     msg = "{} — state={} finalStatus={} progress={:.1f}%".format(
@@ -177,9 +212,18 @@ class AppStatusTool(OpsToolBase):
                             "retention configurata)".format(app_id)
                 )
 
+        counters_note = ""
+        if fields["state"] in ("FINISHED", "FAILED", "KILLED"):
+            counters = _fetch_counters_best_effort(
+                self.config, app_id, fields["applicationType"], no_proxy, use_krb)
+            if counters:
+                fields["counters"] = counters
+            else:
+                counters_note = "\ncounters non disponibili"
+
         return CheckResult(
             name=self.name,
             status=_status_from_fields(fields),
-            message=_message_from_fields(app_id, fields),
+            message=_message_from_fields(app_id, fields) + counters_note,
             details=fields
         )
