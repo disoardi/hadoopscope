@@ -19,6 +19,7 @@ C_WARN         = 6
 C_CRIT         = 7
 C_BORDER       = 8
 C_DIM          = 9
+C_TAB_HOME_OFF = 10
 
 
 def init_colors():
@@ -36,19 +37,26 @@ def init_colors():
         curses.init_color(16, 910, 545, 47)    # arancione LCARS ~#e8890c
         curses.init_color(17, 608, 420, 788)    # viola LCARS ~#9b6bc9
         curses.init_color(18, 788, 420, 608)    # rosa LCARS ~#c96b9b
-        orange, purple, pink = 16, 17, 18
+        curses.init_color(19, 380, 470, 700)    # blu LCARS ~#6178b3 (HOME inattivo)
+        orange, purple, pink, blue = 16, 17, 18, 19
     else:
-        orange, purple, pink = curses.COLOR_YELLOW, curses.COLOR_MAGENTA, curses.COLOR_MAGENTA
+        orange, purple, pink, blue = curses.COLOR_YELLOW, curses.COLOR_MAGENTA, curses.COLOR_MAGENTA, curses.COLOR_BLUE
 
-    curses.init_pair(C_TAB_ACTIVE, curses.COLOR_BLACK, orange)
-    curses.init_pair(C_TAB_HOME,   curses.COLOR_BLACK, orange)
-    curses.init_pair(C_TAB_MON,    curses.COLOR_BLACK, purple)
-    curses.init_pair(C_TAB_OPS,    curses.COLOR_BLACK, pink)
-    curses.init_pair(C_OK,         curses.COLOR_GREEN,  -1)
-    curses.init_pair(C_WARN,       curses.COLOR_YELLOW, -1)
-    curses.init_pair(C_CRIT,       curses.COLOR_RED,    -1)
-    curses.init_pair(C_BORDER,     curses.COLOR_CYAN,   -1)
-    curses.init_pair(C_DIM,        curses.COLOR_WHITE,  -1)
+    # C_TAB_ACTIVE è il colore del tab correntemente selezionato (sempre
+    # arancione, qualunque sezione sia). C_TAB_HOME/_MON/_OPS sono i colori
+    # "a riposo" (non selezionato) di ciascuna sezione — devono essere
+    # tutti DIVERSI da C_TAB_ACTIVE, altrimenti il tab attivo si confonde
+    # con quello a riposo quando coincidono (bug: HOME usava arancione sia
+    # attivo sia inattivo, indistinguibile).
+    curses.init_pair(C_TAB_ACTIVE,   curses.COLOR_BLACK, orange)
+    curses.init_pair(C_TAB_HOME_OFF, curses.COLOR_BLACK, blue)
+    curses.init_pair(C_TAB_MON,      curses.COLOR_BLACK, purple)
+    curses.init_pair(C_TAB_OPS,      curses.COLOR_BLACK, pink)
+    curses.init_pair(C_OK,           curses.COLOR_GREEN,  -1)
+    curses.init_pair(C_WARN,         curses.COLOR_YELLOW, -1)
+    curses.init_pair(C_CRIT,         curses.COLOR_RED,    -1)
+    curses.init_pair(C_BORDER,       curses.COLOR_CYAN,   -1)
+    curses.init_pair(C_DIM,          curses.COLOR_WHITE,  -1)
 
 
 def safe_addstr(win, y, x, text, attr=0):
@@ -78,16 +86,36 @@ def draw_box(win, y, x, h, w, color_pair=C_BORDER, double=True):
     safe_addstr(win, y + h - 1, x, bl + hz * (w - 2) + br, attr)
 
 
+SIDEBAR_WIDTH = 18  # colonna del divisore verticale tra sidebar e contenuto
+
+
 def draw_sidebar(win, tabs, active_index):
     # type: (object, list, int) -> None
     """Sidebar persistente a sinistra — un blocco pieno per tab, colore
-    diverso per sezione, il tab attivo è sempre in arancione."""
-    pairs = [C_TAB_HOME, C_TAB_MON, C_TAB_OPS]
+    diverso per sezione a riposo, il tab attivo è sempre in arancione
+    (mai uguale al colore a riposo di nessuna sezione, altrimenti il
+    tab selezionato diventa indistinguibile da uno inattivo)."""
+    pairs = [C_TAB_HOME_OFF, C_TAB_MON, C_TAB_OPS]
     for i, label in enumerate(tabs):
         pair = C_TAB_ACTIVE if i == active_index else pairs[i % len(pairs)]
         marker = "▶ " if i == active_index else "  "
         text = "{}{}".format(marker, label).ljust(16)
-        safe_addstr(win, i * 2 + 1, 0, text, curses.color_pair(pair) | curses.A_BOLD)
+        safe_addstr(win, i * 2 + 2, 1, text, curses.color_pair(pair) | curses.A_BOLD)
+
+
+def draw_frame(win, title=""):
+    # type: (object, str) -> tuple
+    """Riquadro LCARS esterno che racchiude l'intera applicazione, con
+    una linea verticale che separa la sidebar dal contenuto. Ritorna
+    (content_y, content_x) — coordinate da cui gli screen devono partire
+    per restare dentro il riquadro."""
+    max_y, max_x = win.getmaxyx()
+    draw_box(win, 0, 0, max_y, max_x, color_pair=C_BORDER, double=True)
+    if title:
+        safe_addstr(win, 0, 3, " {} ".format(title), curses.color_pair(C_BORDER) | curses.A_BOLD)
+    for y in range(1, max_y - 1):
+        safe_addstr(win, y, SIDEBAR_WIDTH, "│", curses.color_pair(C_BORDER))
+    return 1, SIDEBAR_WIDTH + 2
 
 
 def draw_list(win, items, cursor, y, x, h, w, selected=None):

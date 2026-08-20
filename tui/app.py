@@ -9,7 +9,7 @@ import sys
 from config import load_config
 from bootstrap import discover_capabilities, ensure_ansible
 import state_store
-from tui.widgets import init_colors, draw_sidebar, confirm
+from tui.widgets import init_colors, draw_sidebar, draw_frame, confirm
 from tui.screens.home import HomeGridScreen
 from tui.screens.monitoring import MonitoringMenuScreen
 from tui.screens.ops import OpsToolListScreen
@@ -45,6 +45,7 @@ class App(object):
         # type: () -> None
         while True:
             self.stdscr.erase()
+            draw_frame(self.stdscr, title="HADOOPSCOPE")
             draw_sidebar(self.stdscr, TABS, self.active_tab)
             self.current_screen().render(self.stdscr)
             self.stdscr.refresh()

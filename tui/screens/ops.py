@@ -80,6 +80,7 @@ class OpsParamInputScreen(Screen):
         self.tool_cls = tool_cls
         self.env_name = env_name
         self.values = {}  # type: dict
+        self.result_screen = None  # type: object
 
     def enter(self):
         # type: () -> None
@@ -117,11 +118,17 @@ class OpsParamInputScreen(Screen):
 
     def render(self, stdscr):
         # type: (object) -> None
-        safe_addstr(stdscr, 0, 20, "Esecuzione in corso...", curses.A_BOLD)
+        safe_addstr(stdscr, 0, 20, "Esecuzione in corso... (premi un tasto)", curses.A_BOLD)
 
     def handle_input(self, key):
         # type: (int) -> object
-        return None
+        """enter() ha già eseguito prompt+run() in modo sincrono prima che
+        questa schermata venisse anche solo disegnata — self.result_screen
+        è quindi già pronto. Qualunque tasto ci transita sopra: senza
+        questo return la schermata resterebbe bloccata per sempre in
+        attesa di un tasto che non fa nulla (bug reale trovato in test
+        manuale — 'app-status' restava su 'Esecuzione in corso...')."""
+        return self.result_screen
 
 
 class OpsResultScreen(Screen):
