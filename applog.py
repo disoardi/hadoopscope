@@ -135,6 +135,13 @@ def log_result(result):
             _w("{} {} {}".format(ts, _CONT, line))
 
 
+def log_run_interrupted(env_name, signal_name, completed, total):
+    # type: (str, str, int, int) -> None
+    """Log un'interruzione esplicita (SIGINT/SIGTERM) durante un run."""
+    _w("{} {} RUN INTERRUPTED ({}) env={} -- {} check(s) completati su {}".format(
+        _now(), _SEP, signal_name, env_name, completed, total))
+
+
 def log_run_end(env_name, results):
     # type: (str, list) -> None
     """Log riepilogo di fine run."""

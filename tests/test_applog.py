@@ -138,6 +138,21 @@ def test_log_run_end_summary():
         _reset_applog()
 
 
+def test_log_run_interrupted():
+    tmpdir = tempfile.mkdtemp()
+    try:
+        applog.setup(_make_cfg(tmpdir))
+        applog.log_run_interrupted("prod-cdp", "SIGINT", 2, 5)
+        with open(os.path.join(tmpdir, "test.log")) as f:
+            content = f.read()
+        assert "RUN INTERRUPTED (SIGINT)" in content
+        assert "env=prod-cdp" in content
+        assert "2 check(s) completati su 5" in content
+    finally:
+        shutil.rmtree(tmpdir)
+        _reset_applog()
+
+
 def test_no_log_when_not_setup():
     """log_result e log_run_end sono no-op se setup non e' stato chiamato."""
     _reset_applog()
@@ -155,6 +170,7 @@ if __name__ == "__main__":
         test_log_result_warning_full_over_threshold,
         test_log_result_multiline_message_no_over_threshold,
         test_log_run_end_summary,
+        test_log_run_interrupted,
         test_no_log_when_not_setup,
     ]
     failed = 0

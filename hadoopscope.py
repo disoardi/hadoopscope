@@ -5,6 +5,7 @@ from __future__ import print_function
 
 import argparse
 import json
+import signal
 import sys
 import os
 
@@ -16,6 +17,19 @@ from bootstrap import discover_capabilities, ensure_ansible, print_capabilities
 from checks.base import CheckResult
 import debug as _debug
 import applog as _applog
+
+# Stato del run corrente, aggiornato da run_checks_for_env — letto dal signal
+# handler per loggare un'interruzione esplicita invece di un RUN START orfano
+_run_state = {"env": None, "completed": 0, "total": 0}
+
+
+def _handle_interrupt(signum, frame):
+    # type: (int, object) -> None
+    name = "SIGINT" if signum == signal.SIGINT else "SIGTERM"
+    if _run_state["env"]:
+        _applog.log_run_interrupted(
+            _run_state["env"], name, _run_state["completed"], _run_state["total"])
+    sys.exit(130 if signum == signal.SIGINT else 143)
 
 
 def build_arg_parser():
@@ -130,7 +144,11 @@ def run_checks_for_env(env_name, env_config, global_config, caps, args):
     if "checks" in global_config:
         check_config["checks"] = global_config["checks"]
 
-    for CheckClass in check_classes:
+    _run_state["env"] = env_name
+    _run_state["total"] = len(check_classes)
+
+    for i, CheckClass in enumerate(check_classes):
+        _run_state["completed"] = i
         instance = CheckClass(config=check_config, caps=caps)
 
         if not instance.can_run():
@@ -262,6 +280,11 @@ def main():
     # Inizializza logger rotante (usa i default se sezione logging assente)
     _applog.setup(cfg)
 
+    # Interruzione manuale o da watchdog esterno -> log esplicito invece di
+    # un RUN START orfano indistinguibile da un hang (vedi issue #4)
+    signal.signal(signal.SIGINT, _handle_interrupt)
+    signal.signal(signal.SIGTERM, _handle_interrupt)
+
     # Assicura Ansible disponibile se serve
     caps = ensure_ansible(caps)
 
@@ -289,6 +312,7 @@ def main():
         for r in results:
             _applog.log_result(r)
         _applog.log_run_end(env_name, results)
+        _run_state["env"] = None
 
         if args.output == "text":
             print("\nHadoopScope — {} @ {}".format(
