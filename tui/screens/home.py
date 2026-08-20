@@ -30,10 +30,18 @@ class HomeGridScreen(Screen):
         self.envs = []
         for env in configured:
             row = summary_by_env.get(env)
+            # HdfsSpace/YarnClusterMetrics sono check "informativi" (non
+            # solo salute) letti dallo stesso check_state — nessuna nuova
+            # tabella o query aggregata, solo righe extra già persistite.
+            by_check = {r["check_name"]: r for r in state_store.get_env_summary(env)}
+            hdfs = by_check.get("HdfsSpace")
+            yarn = by_check.get("YarnClusterMetrics")
             self.envs.append({
                 "env": env,
                 "worst_status": row["worst_status"] if row else None,
                 "counts": row["counts"] if row else {},
+                "hdfs": hdfs["details"] if hdfs else None,
+                "yarn": yarn["details"] if yarn else None,
             })
         if self.cursor >= len(self.envs):
             self.cursor = max(0, len(self.envs) - 1)
@@ -42,7 +50,7 @@ class HomeGridScreen(Screen):
         # type: (object) -> None
         safe_addstr(stdscr, 0, 20, "HOME — {} environment(s) configurati".format(len(self.envs)),
                    curses.A_BOLD)
-        col_w, row_h = 26, 6
+        col_w, row_h = 26, 8
         for i, entry in enumerate(self.envs):
             col = i % 3
             row = i // 3
@@ -58,6 +66,16 @@ class HomeGridScreen(Screen):
                 safe_addstr(stdscr, y + 2, x + 2, "● {}".format(entry["worst_status"]), status_attr)
                 counts_str = "  ".join("{} {}".format(v, k) for k, v in entry["counts"].items())
                 safe_addstr(stdscr, y + 3, x + 2, counts_str[:col_w - 4])
+                line_y = y + 5
+                if entry["hdfs"] and entry["hdfs"].get("used_pct") is not None:
+                    safe_addstr(stdscr, line_y, x + 2,
+                               "HDFS: {:.0f}% usato".format(entry["hdfs"]["used_pct"])[:col_w - 4])
+                    line_y += 1
+                if entry["yarn"]:
+                    safe_addstr(stdscr, line_y, x + 2,
+                               "YARN: {} run / {} pend".format(
+                                   entry["yarn"].get("appsRunning", 0),
+                                   entry["yarn"].get("appsPending", 0))[:col_w - 4])
         safe_addstr(stdscr, 2 + ((len(self.envs) // 3) + 1) * row_h + 1, 20,
                    "↑↓←→ naviga · Invio dettaglio · Tab cambia sezione", curses.color_pair(C_DIM))
 

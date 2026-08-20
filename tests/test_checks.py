@@ -25,7 +25,7 @@ from checks.ambari import (
     ConfigStalenessCheck, NameNodeHACheck, NameNodeBlocksCheck,
 )
 from checks.webhdfs import HdfsDataNodeCheck, HdfsSpaceCheck
-from checks.yarn import YarnNodeHealthCheck, YarnQueueCheck
+from checks.yarn import YarnNodeHealthCheck, YarnQueueCheck, YarnClusterMetricsCheck
 from checks.cloudera import ClouderaServiceHealthCheck
 from checks.hive import (
     _build_beeline_url, _build_beeline_cmd, _merge_ns_cfg, _zk_host_str, _label_from_cfg,
@@ -777,6 +777,37 @@ def test_yarn_nodes_unhealthy():
 def test_yarn_nodes_connection_error():
     config = {"yarn": {"rm_url": "http://127.0.0.1:19998"}}
     check  = YarnNodeHealthCheck(config, {})
+    result = check.run()
+    assert result.status == CheckResult.UNKNOWN
+
+
+def test_yarn_cluster_metrics_ok():
+    fixture = load_fixture("yarn_cluster_metrics.json")
+    route_map = {"/ws/v1/cluster/metrics": fixture}
+    server, port = start_mock_server(route_map)
+
+    config = {"yarn": {"rm_url": "http://127.0.0.1:{}".format(port)}}
+    try:
+        check  = YarnClusterMetricsCheck(config, {})
+        result = check.run()
+        assert result.status == CheckResult.OK, "{}: {}".format(result.status, result.message)
+        assert result.details["appsRunning"] == 2
+        assert result.details["appsPending"] == 2
+        assert result.details["allocatedMB"] == 12288
+        assert result.details["totalMB"] == 16384
+    finally:
+        server.shutdown()
+
+
+def test_yarn_cluster_metrics_no_rm_url():
+    check  = YarnClusterMetricsCheck({}, {})
+    result = check.run()
+    assert result.status == CheckResult.SKIPPED
+
+
+def test_yarn_cluster_metrics_connection_error():
+    config = {"yarn": {"rm_url": "http://127.0.0.1:19998"}}
+    check  = YarnClusterMetricsCheck(config, {})
     result = check.run()
     assert result.status == CheckResult.UNKNOWN
 
@@ -1583,6 +1614,9 @@ if __name__ == "__main__":
         test_yarn_nodes_ok,
         test_yarn_nodes_unhealthy,
         test_yarn_nodes_connection_error,
+        test_yarn_cluster_metrics_ok,
+        test_yarn_cluster_metrics_no_rm_url,
+        test_yarn_cluster_metrics_connection_error,
         test_yarn_connection_error_suggests_rm_url,
         test_cloudera_service_ok,
         test_config_manual_parser,

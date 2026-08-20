@@ -80,7 +80,7 @@ def build_check_registry(env_config, caps):
         ClusterAlertsCheck, ConfigStalenessCheck
     )
     from checks.webhdfs import HdfsSpaceCheck, HdfsDataNodeCheck, HdfsWritabilityCheck
-    from checks.yarn import YarnNodeHealthCheck, YarnQueueCheck
+    from checks.yarn import YarnNodeHealthCheck, YarnQueueCheck, YarnClusterMetricsCheck
     from checks.hive import HiveCheck, HivePartitionCheck
     from checks.cloudera import (
         ClouderaServiceHealthCheck, ClouderaParcelCheck, ClouderaNameNodeHACheck
@@ -114,6 +114,7 @@ def build_check_registry(env_config, caps):
         "yarn": [
             YarnNodeHealthCheck,
             YarnQueueCheck,
+            YarnClusterMetricsCheck,
         ],
     }
 

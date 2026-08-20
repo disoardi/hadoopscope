@@ -374,3 +374,56 @@ class YarnQueueCheck(CheckBase):
             message="Queue usage issues: {}".format("; ".join(msgs)),
             details={"issues": [{"queue": i[1], "used_pct": i[2]} for i in issues]}
         )
+
+
+class YarnClusterMetricsCheck(CheckBase):
+    """Metriche generali del cluster YARN — app in esecuzione/pending,
+    memoria allocata/disponibile. Puramente informativo per la dashboard
+    'at a glance' (Home): nessuna soglia, sempre OK se raggiungibile —
+    non è un check di salute, è un check di CHECK_CATEGORIES "yarn"
+    a scopo pubblicitario di stato, riusa lo stesso _rm_url/_yarn_get
+    delle altre YARN check."""
+
+    requires = []
+
+    def run(self):
+        # type: () -> CheckResult
+        base, is_auto = _rm_url(self.config)
+        if base is None:
+            return CheckResult(
+                name="YarnClusterMetrics",
+                status=CheckResult.SKIPPED,
+                message="yarn.rm_url not configured — add yarn.rm_url to config"
+            )
+        no_proxy = self.config.get("no_proxy", False)
+        use_krb  = self.config.get("kerberos", {}).get("enabled", False)
+
+        try:
+            data = _yarn_get(base, "metrics", no_proxy=no_proxy, kerberos=use_krb)
+        except IOError as e:
+            msg = str(e)
+            if is_auto:
+                msg += " — Tip: set yarn.rm_url in config (auto-detected: {})".format(base)
+            return CheckResult(
+                name="YarnClusterMetrics",
+                status=CheckResult.UNKNOWN,
+                message=msg
+            )
+
+        m = data.get("clusterMetrics", {})
+        details = {
+            "appsRunning":   m.get("appsRunning", 0),
+            "appsPending":   m.get("appsPending", 0),
+            "totalMB":       m.get("totalMB", 0),
+            "allocatedMB":   m.get("allocatedMB", 0),
+            "availableMB":   m.get("availableMB", 0),
+        }
+        message = "{} running, {} pending — {}/{} MB allocated".format(
+            details["appsRunning"], details["appsPending"],
+            details["allocatedMB"], details["totalMB"])
+        return CheckResult(
+            name="YarnClusterMetrics",
+            status=CheckResult.OK,
+            message=message,
+            details=details
+        )
