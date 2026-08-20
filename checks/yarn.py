@@ -76,6 +76,25 @@ def _cm_decommissioned_hosts(config, timeout=DEFAULT_TIMEOUT):
     return decom
 
 
+def _resolve_url(cfg_block, singular_key, plural_key):
+    # type: (dict, str, str) -> tuple
+    """Risolve un endpoint REST da un blocco di config, dando priorità
+    alla forma plurale (lista, primo elemento — il failover HA tra le
+    repliche della lista è delegato al redirect 307 seguito da curl,
+    non a un retry esplicito su ogni elemento).
+
+    Restituisce (url_or_None, is_auto). is_auto è sempre False qui —
+    il flag è solo per compatibilità con chi (es. _rm_url) aggiunge un
+    fallback auto-detect sopra questa funzione.
+    """
+    urls = cfg_block.get(plural_key, [])
+    if urls:
+        return urls[0].rstrip("/"), False
+    if cfg_block.get(singular_key):
+        return cfg_block[singular_key].rstrip("/"), False
+    return None, True
+
+
 def _rm_url(config):
     # type: (dict) -> tuple
     """
@@ -85,11 +104,9 @@ def _rm_url(config):
     Restituisce (None, True) se non configurabile — il check torna SKIPPED.
     """
     yarn_cfg = config.get("yarn", {})
-    rm_urls = yarn_cfg.get("rm_urls", [])
-    if rm_urls:
-        return rm_urls[0].rstrip("/"), False
-    if yarn_cfg.get("rm_url"):
-        return yarn_cfg["rm_url"].rstrip("/"), False
+    url, is_auto = _resolve_url(yarn_cfg, "rm_url", "rm_urls")
+    if url:
+        return url, False
 
     # Fallback HDP only: costruiamo dall'ambari_url sostituendo host e porta.
     # Per CDP (cm_url, no ambari_url) non possiamo auto-rilevare il RM.
@@ -108,9 +125,14 @@ def _rm_url(config):
         return None, True
 
 
-def _yarn_get(base_url, path, timeout=DEFAULT_TIMEOUT, no_proxy=False, kerberos=False):
-    # type: (str, str, int, bool, bool) -> dict
-    url = "{}/ws/v1/cluster/{}".format(base_url, path.lstrip("/"))
+def _yarn_get(base_url, path, timeout=DEFAULT_TIMEOUT, no_proxy=False,
+              kerberos=False, full_path=False):
+    # type: (str, str, int, bool, bool, bool) -> dict
+    """GET REST verso YARN. Se full_path=False (default, comportamento
+    esistente), il path è relativo a /ws/v1/cluster/. Se full_path=True,
+    'path' è già l'URL completo (usato per l'Application History/Timeline
+    Server, che ha un prefisso diverso)."""
+    url = path if full_path else "{}/ws/v1/cluster/{}".format(base_url, path.lstrip("/"))
 
     if kerberos:
         # -L segue il 307 redirect standby→active; --location-trusted
