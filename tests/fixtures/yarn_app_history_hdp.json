@@ -1,0 +1,14 @@
+{
+  "app": {
+    "appId": "application_1699999999999_9001",
+    "user": "hdfs",
+    "name": "old-job",
+    "queue": "default",
+    "type": "MAPREDUCE",
+    "appState": "FINISHED",
+    "finalAppStatus": "SUCCEEDED",
+    "progress": 100.0,
+    "diagnosticsInfo": "",
+    "elapsedTime": 5000
+  }
+}

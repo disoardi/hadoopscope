@@ -1,0 +1,19 @@
+{
+  "app": {
+    "id": "application_1699999999999_0002",
+    "user": "hdfs",
+    "name": "example-job-2",
+    "queue": "default",
+    "state": "FINISHED",
+    "finalStatus": "SUCCEEDED",
+    "progress": 100.0,
+    "applicationType": "MAPREDUCE",
+    "diagnostics": "",
+    "startedTime": 1699999999000,
+    "finishedTime": 1699999999999,
+    "elapsedTime": 999,
+    "allocatedMB": 0,
+    "allocatedVCores": 0,
+    "runningContainers": 0
+  }
+}

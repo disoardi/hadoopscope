@@ -62,28 +62,9 @@ DEFAULT_TIMEOUT = 10
 # Kerberos helpers (stdlib — kinit + curl)
 # ---------------------------------------------------------------------------
 
-def _kinit(keytab, principal, timeout=30):
-    # type: (str, str, int) -> None
-    """Ottieni ticket Kerberos dal keytab. Raises IOError se kinit fallisce."""
-    if not keytab:
-        raise IOError("kerberos.keytab non configurato")
-    if not principal:
-        raise IOError("kerberos.principal non configurato")
-    try:
-        subprocess.check_call(
-            ["kinit", "-kt", keytab, principal],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=timeout
-        )
-    except subprocess.CalledProcessError:
-        raise IOError(
-            "kinit fallito per principal='{}' keytab='{}'. "
-            "Verifica che il keytab sia valido e il KDC raggiungibile.".format(
-                principal, keytab)
-        )
-    except OSError:
-        raise IOError("kinit non trovato nel PATH — installa krb5-user (Debian) o krb5-workstation (RHEL)")
+import kerberos_utils
+
+_kinit = kerberos_utils.kinit
 
 
 def _curl_get_json(url, negotiate=False, timeout=DEFAULT_TIMEOUT, no_proxy=False, insecure=False):
@@ -241,27 +222,17 @@ def _get_ansible_kerberos_cfg(config):
 # Ansible helpers (via_ansible mode)
 # ---------------------------------------------------------------------------
 
-def _find_ansible_bin():
-    # type: () -> str
-    """Trova ansible-playbook nel PATH o nel venv hadoopscope."""
-    import shutil
-    b = shutil.which("ansible-playbook")
-    if b:
-        return b
-    venv = os.path.expanduser("~/.hadoopscope/venv/bin/ansible-playbook")
-    return venv if os.path.exists(venv) else ""
+import ansible_runner
+
+_find_ansible_bin = ansible_runner.find_ansible_bin
 
 
 def _build_webhdfs_inventory(ansible_cfg):
     # type: (dict) -> str
-    """Costruisce la stringa inventory Ansible per l'edge node."""
     edge_host = ansible_cfg.get("edge_host", "")
-    if edge_host in ("localhost", "127.0.0.1", "::1"):
-        return "localhost ansible_connection=local"
-    ssh_user = ansible_cfg.get("ssh_user", "root")
-    ssh_key  = ansible_cfg.get("ssh_key", "~/.ssh/id_rsa")
-    return "{} ansible_user={} ansible_ssh_private_key_file={}".format(
-        edge_host, ssh_user, ssh_key)
+    ssh_user  = ansible_cfg.get("ssh_user", "root")
+    ssh_key   = ansible_cfg.get("ssh_key", "~/.ssh/id_rsa")
+    return ansible_runner.build_inventory(edge_host, ssh_user, ssh_key)
 
 
 def _run_ansible_curl(config, shell_script, tag="WebHDFS", timeout=60):
