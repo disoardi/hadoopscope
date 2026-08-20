@@ -18,6 +18,7 @@ from checks.base import CheckResult
 import debug as _debug
 import applog as _applog
 from ops import build_ops_registry
+import state_store
 
 # Stato del run corrente, aggiornato da run_checks_for_env — letto dal signal
 # handler per loggare un'interruzione esplicita invece di un RUN START orfano
@@ -358,6 +359,7 @@ def main():
 
     # Inizializza logger rotante (usa i default se sezione logging assente)
     _applog.setup(cfg)
+    state_store.init()
 
     # Interruzione manuale o da watchdog esterno -> log esplicito invece di
     # un RUN START orfano indistinguibile da un hang (vedi issue #4)
@@ -390,6 +392,7 @@ def main():
 
         for r in results:
             _applog.log_result(r)
+            state_store.save_result(env_name, r)
         _applog.log_run_end(env_name, results)
         _run_state["env"] = None
 
