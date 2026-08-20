@@ -10,7 +10,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from checks.yarn import _resolve_url
 from checks.base import CheckResult
 from ops.base import OpsParam, OpsToolBase
-from ops.yarn_app import AppStatusTool
+import shutil
+import tempfile
+from ops.yarn_app import AppStatusTool, AppLogsTool
 from tests.test_checks import start_mock_server, load_fixture
 
 try:
@@ -284,6 +286,98 @@ def test_app_status_counters_not_available_when_not_configured():
         server.shutdown()
 
 
+def test_app_logs_no_edge_host_configured():
+    tool = AppLogsTool(config={}, caps={"ansible": True})
+    result = tool.run(app_id="application_x")
+    assert result.status == CheckResult.UNKNOWN
+    assert "edge_host" in result.message
+
+
+def test_app_logs_success_writes_file():
+    tmpdir = tempfile.mkdtemp()
+    try:
+        cfg = {
+            "download_dir": tmpdir,
+            "ansible": {"edge_host": "localhost"},
+        }
+        tool = AppLogsTool(config=cfg, caps={"ansible": True})
+        fake_output = "log line 1\nlog line 2\n"
+        with mock.patch("ops.yarn_app.ansible_runner.find_ansible_bin",
+                        return_value="/usr/bin/ansible-playbook"), \
+             mock.patch("ops.yarn_app.ansible_runner.run_playbook",
+                        return_value=(0, '"r.stdout": "{}"'.format(
+                            fake_output.replace("\n", "\\n")), "")):
+            result = tool.run(app_id="application_test_001")
+        assert result.status == CheckResult.OK
+        out_path = os.path.join(tmpdir, "application_test_001.log")
+        assert os.path.exists(out_path)
+        with open(out_path) as f:
+            content = f.read()
+        assert "log line 1" in content
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_app_logs_ansible_failure():
+    tmpdir = tempfile.mkdtemp()
+    try:
+        cfg = {"download_dir": tmpdir, "ansible": {"edge_host": "localhost"}}
+        tool = AppLogsTool(config=cfg, caps={"ansible": True})
+        with mock.patch("ops.yarn_app.ansible_runner.find_ansible_bin",
+                        return_value="/usr/bin/ansible-playbook"), \
+             mock.patch("ops.yarn_app.ansible_runner.run_playbook",
+                        return_value=(2, "FAILED! => {\"msg\": \"boom\"}", "")):
+            result = tool.run(app_id="application_test_002")
+        assert result.status == CheckResult.CRITICAL
+        assert "boom" in result.message
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_app_logs_default_download_dir():
+    tool = AppLogsTool(config={"ansible": {"edge_host": "x"}}, caps={"ansible": True})
+    assert tool._resolve_download_dir() == os.path.expanduser("~/.hadoopscope/downloads")
+
+
+def test_app_logs_kinit_injected_when_ansible_kerberos_enabled():
+    tmpdir = tempfile.mkdtemp()
+    try:
+        cfg = {
+            "download_dir": tmpdir,
+            "ansible": {
+                "edge_host": "edge1.example.com",
+                "kerberos": {"enabled": True, "keytab": "/edge.keytab",
+                             "client_principal": "svc@REALM"},
+            },
+        }
+        tool = AppLogsTool(config=cfg, caps={"ansible": True})
+        with mock.patch("ops.yarn_app.ansible_runner.find_ansible_bin",
+                        return_value="/usr/bin/ansible-playbook"), \
+             mock.patch("ops.yarn_app.ansible_runner.run_playbook",
+                        return_value=(0, '"r.stdout": "ok\\n"', "")) as mocked_run:
+            tool.run(app_id="application_test_003")
+        _, kwargs = mocked_run.call_args
+        assert kwargs["kinit_cmd"] == "kinit -kt /edge.keytab svc@REALM"
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_app_logs_no_kinit_when_ansible_kerberos_disabled():
+    tmpdir = tempfile.mkdtemp()
+    try:
+        cfg = {"download_dir": tmpdir, "ansible": {"edge_host": "edge1.example.com"}}
+        tool = AppLogsTool(config=cfg, caps={"ansible": True})
+        with mock.patch("ops.yarn_app.ansible_runner.find_ansible_bin",
+                        return_value="/usr/bin/ansible-playbook"), \
+             mock.patch("ops.yarn_app.ansible_runner.run_playbook",
+                        return_value=(0, '"r.stdout": "ok\\n"', "")) as mocked_run:
+            tool.run(app_id="application_test_004")
+        _, kwargs = mocked_run.call_args
+        assert kwargs["kinit_cmd"] is None
+    finally:
+        shutil.rmtree(tmpdir)
+
+
 if __name__ == "__main__":
     tests = [
         test_resolve_url_singular_key,
@@ -307,6 +401,12 @@ if __name__ == "__main__":
         test_app_status_kinit_falls_back_to_top_level_kerberos,
         test_app_status_counters_best_effort_when_configured,
         test_app_status_counters_not_available_when_not_configured,
+        test_app_logs_no_edge_host_configured,
+        test_app_logs_success_writes_file,
+        test_app_logs_ansible_failure,
+        test_app_logs_default_download_dir,
+        test_app_logs_kinit_injected_when_ansible_kerberos_enabled,
+        test_app_logs_no_kinit_when_ansible_kerberos_disabled,
     ]
     failed = 0
     for t in tests:

@@ -3,9 +3,12 @@ fetch log (AppLogsTool, vedi Task 10)."""
 
 from __future__ import print_function
 
+import os
+
 from checks.base import CheckResult
 from checks.yarn import _rm_url, _resolve_url, _yarn_get
 from ops.base import OpsParam, OpsToolBase
+import ansible_runner
 import kerberos_utils
 
 _TERMINAL_STATUS_MAP = {
@@ -226,4 +229,77 @@ class AppStatusTool(OpsToolBase):
             status=_status_from_fields(fields),
             message=_message_from_fields(app_id, fields) + counters_note,
             details=fields
+        )
+
+
+class AppLogsTool(OpsToolBase):
+    """Scarica i log aggregati di un'applicazione YARN terminata, eseguendo
+    'yarn logs -applicationId <id>' sull'edge node via Ansible (nessun
+    client Hadoop richiesto sulla macchina locale)."""
+
+    name = "app-logs"
+    description = "Scarica i log di un'applicazione YARN terminata"
+    params = [OpsParam("app_id", help="YARN application ID")]
+    requires = [["ansible"], ["venv_ansible"], ["docker"]]
+
+    def _resolve_download_dir(self):
+        # type: () -> str
+        configured = self.config.get("download_dir")
+        return os.path.expanduser(configured or "~/.hadoopscope/downloads")
+
+    def run(self, app_id):
+        # type: (str) -> CheckResult
+        ansible_cfg = self.config.get("ansible", {})
+        edge_host = ansible_cfg.get("edge_host")
+        ssh_user  = ansible_cfg.get("ssh_user", "hadoop")
+        ssh_key   = ansible_cfg.get("ssh_key")
+
+        if not edge_host:
+            return CheckResult(
+                name=self.name,
+                status=CheckResult.UNKNOWN,
+                message="ansible.edge_host not configured"
+            )
+
+        ansible_bin = ansible_runner.find_ansible_bin()
+        if not ansible_bin:
+            return CheckResult(
+                name=self.name,
+                status=CheckResult.SKIPPED,
+                message="ansible binary not found despite can_run() check"
+            )
+
+        inventory = ansible_runner.build_inventory(edge_host, ssh_user, ssh_key)
+
+        krb = ansible_cfg.get("kerberos", {})
+        kinit_cmd = None
+        if krb.get("enabled") and krb.get("keytab") and krb.get("client_principal"):
+            kinit_cmd = "kinit -kt {} {}".format(krb["keytab"], krb["client_principal"])
+
+        cmd = "yarn logs -applicationId {}".format(app_id)
+        rc, out, err = ansible_runner.run_playbook(
+            ansible_bin, inventory, cmd, tag=self.name,
+            kinit_cmd=kinit_cmd, timeout=180)
+
+        if rc != 0:
+            error_detail = ansible_runner.extract_task_error(out) if out else err
+            return CheckResult(
+                name=self.name,
+                status=CheckResult.CRITICAL,
+                message="fetch log fallito per {}: {}".format(app_id, error_detail[:300])
+            )
+
+        log_content = ansible_runner.extract_stdout(out)
+        download_dir = self._resolve_download_dir()
+        if not os.path.isdir(download_dir):
+            os.makedirs(download_dir)
+        out_path = os.path.join(download_dir, "{}.log".format(app_id))
+        with open(out_path, "w") as f:
+            f.write(log_content)
+
+        return CheckResult(
+            name=self.name,
+            status=CheckResult.OK,
+            message="log salvati in {} ({} bytes)".format(out_path, len(log_content)),
+            details={"path": out_path, "size": len(log_content)}
         )
