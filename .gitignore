@@ -31,6 +31,9 @@ poetry.toml
 /tmp/hadoopscope-*/
 ~/.hadoopscope/
 
+# Contesto locale — note operative cliente/ambiente, mai committato
+.claude/local/
+
 # IDE
 .idea/
 .vscode/

@@ -15,6 +15,18 @@ CLI tool Python per monitoraggio unificato di cluster Hadoop **HDP** (Ambari RES
 
 ---
 
+## 📂 Contesto locale (non versionato)
+
+Hostname reali, dettagli di accesso cliente e stato delle investigazioni in corso
+NON vanno in questo file — vivono in `.claude/local/` (gitignored) e sono importati qui:
+
+@.claude/local/CONTEXT.md
+
+Se `.claude/local/CONTEXT.md` non esiste (repo appena clonato), questa sezione
+è semplicemente vuota — nessun errore.
+
+---
+
 ## ⚙️ Regole Tecniche NON Negoziabili
 
 ### Python compatibility
@@ -269,7 +281,7 @@ Problemi reali incontrati in produzione — leggili prima di scrivere codice che
 
 ### HttpFS — accesso sempre tramite load balancer
 Il keytab HttpFS contiene `HTTP/<LB-hostname>@REALM` ma NON `HTTP/<nodo-diretto>@REALM`.
-Se `webhdfs.url` punta direttamente al nodo (es. `vmgclalpr1615:14000`), la negoziazione
+Se `webhdfs.url` punta direttamente al nodo (es. `<edge-node>:14000`), la negoziazione
 SPNEGO fallisce con `GSSException: No valid credentials` → HTTP 403.
 **Regola**: `webhdfs.url` deve puntare **sempre al hostname del load balancer HttpFS**.
 
@@ -346,39 +358,6 @@ Le entry gestite da `_step_crontab_manager` in `cluster_status.py` seguono quest
 
 ---
 
-## 🗓️ Sprint Plan (questo è il task corrente)
-
-### Giorno 1 — Foundation (parti da qui)
-1. `hadoopscope.py` — CLI con argparse: `--env`, `--checks`, `--dry-run`, `--output`, `--config`
-2. `config.py` — YAML parser manuale (no PyYAML) + env var expansion
-3. `checks/base.py` — `CheckResult` + `CheckBase`
-4. `checks/ambari.py` — `AmbariServiceHealthCheck` con `requires=[]` (sempre disponibile via API)
-5. `alerts/log_alert.py` — output JSON/text su stdout + file opzionale
-
-**Test di fine giorno:**
-```bash
-AMBARI_PASS=admin python3 hadoopscope.py \
-  --config config/test.yaml --env test-hdp \
-  --checks health --output text --dry-run
-```
-→ deve stampare il piano di esecuzione senza fare chiamate reali
-
-### Giorno 2 — WebHDFS + Email
-- `checks/webhdfs.py`: HdfsSpaceCheck, HdfsWritabilityCheck, HdfsDataNodeCheck
-- `alerts/email_alert.py`: smtplib, template HTML+text
-
-### Giorno 3 — Bootstrap Layer
-- `bootstrap.py`: discover_capabilities(), ensure_ansible()
-- Integrazione nel main loop
-
-### Giorno 4 — Check avanzati
-- NameNode HA, Config Staleness, YARN node health
-
-### Giorno 5 — TuxBox + Packaging
-- `tuxbox.toml`, `install.sh`, README, tag v0.1.0
-
----
-
 ## ✅ Testing Strategy
 
 - Per unit test: usa fixture JSON (file `.json` in `tests/fixtures/`) che simulano
@@ -409,11 +388,17 @@ prefer      = "venv"
 
 ---
 
-## 🔗 Documentazione Completa
+## 🤝 Contributor
 
-La documentazione IdeaFlow completa è in:
-`~/Progetti/silverbullet/space/Idee/ideas/`
-- `idea-003-hadoop-monitor-elaborated.md` — architettura dettagliata
-- `idea-003-hadoop-monitor-validated.md` — risk assessment, scope MVP
-- `idea-003-hadoop-monitor-document.md` — API reference, config schema, output examples
-- `idea-003-hadoop-monitor-prepare.md` — sprint plan dettagliato, checklist
+I contributi a HadoopScope passano da **github.com/disoardi/hadoopscope** — fork
+o branch e pull request contro `main`. (Il progetto ha anche un mirror interno
+non pubblico, irrilevante per chi contribuisce da fuori.)
+
+- Rispetta le "Regole Tecniche NON Negoziabili" sopra — soprattutto compatibilità
+  Python 3.6+ e zero dipendenze nel core
+- Nuovi check seguono il pattern `CheckBase` (vedi sopra); nuovi alert seguono
+  la stessa interfaccia dei moduli in `alerts/`
+- Ogni PR deve passare `make test` prima della review
+- **Ogni modifica di comportamento va documentata** nella stessa PR: README,
+  pagine in `docs/` (MkDocs) e, se introduce un pattern architetturale nuovo,
+  questo CLAUDE.md
