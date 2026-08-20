@@ -116,6 +116,92 @@ def build_check_registry(env_config, caps):
     }
 
 
+def build_ops_registry():
+    # type: () -> dict
+    """Registry dei tool Ops disponibili, per nome."""
+    from ops.yarn_app import AppStatusTool, AppLogsTool
+    tools = [AppStatusTool, AppLogsTool]
+    return {cls.name: cls for cls in tools}
+
+
+def build_ops_arg_parser():
+    # type: () -> argparse.ArgumentParser
+    p = argparse.ArgumentParser(
+        prog="hadoopscope.py ops",
+        description="HadoopScope Ops — azioni on-demand sui cluster configurati"
+    )
+    p.add_argument("--config", default="config/hadoopscope.yaml",
+                   help="Path to config file (default: config/hadoopscope.yaml)")
+    p.add_argument("--output", default="text", choices=["text", "json"],
+                   help="Output format (default: text)")
+    p.add_argument("--debug", action="store_true")
+    subparsers = p.add_subparsers(dest="tool", required=True)
+    for name, cls in sorted(build_ops_registry().items()):
+        tool_parser = subparsers.add_parser(name, help=cls.description)
+        tool_parser.add_argument("--env", required=True,
+                                 help="Environment su cui eseguire il tool")
+        for param in cls.params:
+            tool_parser.add_argument(
+                "--{}".format(param.name.replace("_", "-")),
+                dest=param.name, required=param.required, help=param.help)
+    return p
+
+
+def ops_main(argv):
+    # type: (list) -> None
+    parser = build_ops_arg_parser()
+    args = parser.parse_args(argv)
+
+    if args.debug:
+        _debug.ENABLED = True
+
+    caps = discover_capabilities()
+
+    try:
+        cfg = load_config(args.config)
+    except Exception as e:
+        print("ERROR loading config: {}".format(e), file=sys.stderr)
+        sys.exit(1)
+
+    caps = ensure_ansible(caps)
+
+    if args.env not in cfg.get("environments", {}):
+        print("ERROR: environment '{}' not found in config".format(args.env),
+              file=sys.stderr)
+        sys.exit(1)
+
+    env_config = cfg["environments"][args.env]
+    check_config = dict(env_config)
+    if "checks" in cfg:
+        check_config["checks"] = cfg["checks"]
+    if "download_dir" in cfg:
+        check_config["download_dir"] = cfg["download_dir"]
+
+    registry = build_ops_registry()
+    tool_cls = registry[args.tool]
+    instance = tool_cls(config=check_config, caps=caps)
+
+    if not instance.can_run():
+        print("SKIP: {} requires: {}".format(args.tool, tool_cls.requires))
+        sys.exit(3)
+
+    tool_kwargs = {p.name: getattr(args, p.name) for p in tool_cls.params}
+    result = instance.run(**tool_kwargs)
+
+    if args.output == "json":
+        print(json.dumps({
+            "tool": args.tool, "env": args.env,
+            "status": result.status, "message": result.message,
+            "details": result.details
+        }, indent=2))
+    else:
+        print("{} — {}".format(result.status, result.name))
+        for line in result.message.splitlines():
+            print("  {}".format(line))
+
+    sys.exit({"OK": 0, "WARNING": 1, "CRITICAL": 2}.get(result.status, 3))
+
+
 def run_checks_for_env(env_name, env_config, global_config, caps, args):
     # type: (str, dict, dict, dict, argparse.Namespace) -> list
     """Seleziona e lancia i check per un singolo environment."""
@@ -354,4 +440,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "ops":
+        ops_main(sys.argv[2:])
+    else:
+        main()
