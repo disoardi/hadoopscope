@@ -92,7 +92,14 @@ class OpsEnvPickerScreen(Screen):
         elif key == curses.KEY_DOWN and self.cursor < len(self.envs) - 1:
             self.cursor += 1
         elif key in (curses.KEY_ENTER, 10, 13):
-            return self._run_tool(self.envs[self.cursor])
+            result_screen = self._run_tool(self.envs[self.cursor])
+            # Rimuove se stessa dallo stack: il risultato prende il posto
+            # dell'env picker invece di impilarsi sopra, così ESC dal
+            # risultato torna direttamente alla lista tool (un solo
+            # livello indietro), non a "riseleziona l'ambiente per lo
+            # stesso tool" — comportamento confuso trovato in test manuale.
+            self.app.current_stack().pop()
+            return result_screen
         return None
 
     def _run_tool(self, env_name):
