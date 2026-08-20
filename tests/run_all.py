@@ -17,6 +17,7 @@ test_files = [
     os.path.join(TESTS_DIR, "test_applog.py"),
     os.path.join(TESTS_DIR, "test_ops.py"),
     os.path.join(TESTS_DIR, "test_ansible_runner.py"),
+    os.path.join(TESTS_DIR, "test_state_store.py"),
 ]
 
 total_failed = 0
