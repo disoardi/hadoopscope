@@ -4,6 +4,7 @@ fetch log (AppLogsTool, vedi Task 10)."""
 from __future__ import print_function
 
 import os
+import re
 
 from checks.base import CheckResult
 from checks.yarn import _rm_url, _resolve_url, _yarn_get
@@ -276,7 +277,22 @@ class AppLogsTool(OpsToolBase):
         if krb.get("enabled") and krb.get("keytab") and krb.get("client_principal"):
             kinit_cmd = "kinit -kt {} {}".format(krb["keytab"], krb["client_principal"])
 
-        cmd = "yarn logs -applicationId {}".format(app_id)
+        # 'yarn logs' esce con rc!=0 (spesso 255) sia per errori reali sia per
+        # il semplice "nessun log trovato" — e con il modulo Ansible 'raw'
+        # (necessario per non dipendere dalla versione Python del target,
+        # vedi ansible_runner.run_playbook) un rc remoto 255 viene confuso
+        # da Ansible con un fallimento della connessione SSH stessa (stesso
+        # codice usato da OpenSSH), risultando in un fuorviante UNREACHABLE
+        # che oltretutto scarta l'output reale del comando. Per evitarlo,
+        # lo script cattura il vero exit code in un sentinel e termina
+        # sempre con exit 0, cosi' Ansible non lo classifica mai come
+        # fallimento di connessione — interpretiamo noi il codice vero.
+        cmd = (
+            "yarn logs -applicationId {app_id}\n"
+            "_HS_RC=$?\n"
+            'echo "___HS_EXIT___:$_HS_RC"\n'
+            "exit 0"
+        ).format(app_id=app_id)
         rc, out, err = ansible_runner.run_playbook(
             ansible_bin, inventory, cmd, tag=self.name,
             kinit_cmd=kinit_cmd, timeout=180)
@@ -289,7 +305,19 @@ class AppLogsTool(OpsToolBase):
                 message="fetch log fallito per {}: {}".format(app_id, error_detail[:300])
             )
 
-        log_content = ansible_runner.extract_stdout(out)
+        raw_stdout = ansible_runner.extract_stdout(out)
+        sentinel = re.search(r"___HS_EXIT___:(\d+)", raw_stdout)
+        true_rc = int(sentinel.group(1)) if sentinel else 0
+        log_content = re.sub(r"___HS_EXIT___:\d+\s*\Z", "", raw_stdout)
+
+        if true_rc != 0:
+            return CheckResult(
+                name=self.name,
+                status=CheckResult.CRITICAL,
+                message="fetch log fallito per {} (yarn logs rc={}): {}".format(
+                    app_id, true_rc, log_content.strip()[:300])
+            )
+
         download_dir = self._resolve_download_dir()
         if not os.path.isdir(download_dir):
             os.makedirs(download_dir)

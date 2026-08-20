@@ -334,6 +334,32 @@ def test_app_logs_ansible_failure():
         shutil.rmtree(tmpdir)
 
 
+def test_app_logs_no_logs_found_reports_critical_not_ok():
+    """yarn logs esce spesso con rc!=0 (255) quando non trova log per
+    un'app — con raw+pty Ansible confonde questo con un fallimento SSH
+    (UNREACHABLE) e scarta l'output reale. Il sentinel exit-code deve
+    permettere di distinguere questo caso e riportarlo come CRITICAL
+    con il messaggio reale, non come OK né come errore di connessione."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        cfg = {"download_dir": tmpdir, "ansible": {"edge_host": "localhost"}}
+        tool = AppLogsTool(config=cfg, caps={"ansible": True})
+        fake_output = (
+            "Can not find the logs for the application: application_x "
+            "with the appOwner: hive\\n___HS_EXIT___:255\\n"
+        )
+        with mock.patch("ops.yarn_app.ansible_runner.find_ansible_bin",
+                        return_value="/usr/bin/ansible-playbook"), \
+             mock.patch("ops.yarn_app.ansible_runner.run_playbook",
+                        return_value=(0, '"r.stdout": "{}"'.format(fake_output), "")):
+            result = tool.run(app_id="application_x")
+        assert result.status == CheckResult.CRITICAL
+        assert "Can not find the logs" in result.message
+        assert not os.path.exists(os.path.join(tmpdir, "application_x.log"))
+    finally:
+        shutil.rmtree(tmpdir)
+
+
 def test_app_logs_default_download_dir():
     tool = AppLogsTool(config={"ansible": {"edge_host": "x"}}, caps={"ansible": True})
     assert tool._resolve_download_dir() == os.path.expanduser("~/.hadoopscope/downloads")
@@ -404,6 +430,7 @@ if __name__ == "__main__":
         test_app_logs_no_edge_host_configured,
         test_app_logs_success_writes_file,
         test_app_logs_ansible_failure,
+        test_app_logs_no_logs_found_reports_critical_not_ok,
         test_app_logs_default_download_dir,
         test_app_logs_kinit_injected_when_ansible_kerberos_enabled,
         test_app_logs_no_kinit_when_ansible_kerberos_disabled,

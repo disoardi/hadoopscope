@@ -51,15 +51,18 @@ def extract_task_error(ansible_stdout):
     # type: (str) -> str
     """Extract the actual task error from Ansible stdout.
 
-    Ansible wraps the task result as JSON after 'FAILED! => '.
-    We parse that JSON to get the real stdout/stderr/msg
-    instead of returning the truncated Ansible header.
+    Ansible wraps the task result as JSON after 'FAILED! => ' (task failure)
+    o 'UNREACHABLE! => ' (fallimento di connessione — ma con il modulo raw
+    un comando remoto che esce con rc=255, come spesso i tool Hadoop CLI in
+    errore, viene scambiato da Ansible per un fallimento SSH: stesso codice
+    che OpenSSH usa per segnalare connessione fallita). Parsiamo entrambi i
+    pattern per estrarre msg/stdout/stderr reali invece del dump grezzo.
     """
     # Ansible stampa il task result come JSON su una sola riga.
     # re.DOTALL NON va usato: cattura anche il PLAY RECAP che segue,
     # rendendo il JSON non parsabile. Il \} assicura di fermarsi
     # alla chiusura dell'oggetto sulla stessa riga.
-    match = re.search(r"FAILED! => (\{.*\})", ansible_stdout)
+    match = re.search(r"(?:FAILED|UNREACHABLE)! => (\{.*\})", ansible_stdout)
     if not match:
         return ansible_stdout[-800:]
     try:
@@ -82,7 +85,8 @@ def extract_stdout(ansible_out):
     m = re.search(r'"r\.stdout":\s*"((?:[^"\\]|\\.)*)"', ansible_out)
     if m:
         raw = m.group(1)
-        raw = raw.replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\")
+        raw = raw.replace("\\r\\n", "\n").replace("\\n", "\n")
+        raw = raw.replace('\\"', '"').replace("\\\\", "\\")
         return raw
     return ""
 
@@ -93,7 +97,8 @@ def extract_stderr(ansible_out):
     m = re.search(r'"r\.stderr":\s*"((?:[^"\\]|\\.)*)"', ansible_out)
     if m:
         raw = m.group(1)
-        raw = raw.replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\")
+        raw = raw.replace("\\r\\n", "\n").replace("\\n", "\n")
+        raw = raw.replace('\\"', '"').replace("\\\\", "\\")
         return raw
     return ""
 
