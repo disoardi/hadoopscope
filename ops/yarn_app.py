@@ -6,6 +6,7 @@ from __future__ import print_function
 from checks.base import CheckResult
 from checks.yarn import _rm_url, _resolve_url, _yarn_get
 from ops.base import OpsParam, OpsToolBase
+import kerberos_utils
 
 _TERMINAL_STATUS_MAP = {
     "SUCCEEDED": CheckResult.OK,
@@ -141,7 +142,20 @@ class AppStatusTool(OpsToolBase):
             )
 
         no_proxy = self.config.get("no_proxy", False)
-        use_krb  = self.config.get("kerberos", {}).get("enabled", False)
+        yarn_krb = self.config.get("yarn", {}).get("kerberos", {})
+        top_krb  = self.config.get("kerberos", {})
+        krb_cfg  = yarn_krb if yarn_krb.get("enabled") else top_krb
+        use_krb  = krb_cfg.get("enabled", False)
+
+        if use_krb:
+            try:
+                kerberos_utils.kinit(krb_cfg.get("keytab"), krb_cfg.get("principal"))
+            except IOError as e:
+                return CheckResult(
+                    name=self.name,
+                    status=CheckResult.UNKNOWN,
+                    message="kinit fallito: {}".format(str(e))
+                )
 
         try:
             data = _yarn_get(base, "apps/{}".format(app_id),

@@ -13,6 +13,11 @@ from ops.base import OpsParam, OpsToolBase
 from ops.yarn_app import AppStatusTool
 from tests.test_checks import start_mock_server, load_fixture
 
+try:
+    from unittest import mock
+except ImportError:
+    import mock
+
 
 def test_resolve_url_singular_key():
     cfg = {"rm_url": "http://rm1:8088/"}
@@ -189,6 +194,60 @@ def test_app_status_not_found_anywhere():
         server.shutdown()
 
 
+def test_app_status_kinit_called_when_kerberos_enabled():
+    fixture = load_fixture("yarn_app_running.json")
+    server, port = start_mock_server({
+        "/ws/v1/cluster/apps/application_1699999999999_0001": fixture,
+    })
+    try:
+        cfg = {
+            "yarn": {
+                "rm_url": "http://127.0.0.1:{}".format(port),
+                "kerberos": {"enabled": True, "keytab": "/x.keytab", "principal": "svc@REALM"},
+            },
+        }
+        tool = AppStatusTool(config=cfg, caps={})
+        with mock.patch("ops.yarn_app.kerberos_utils.kinit") as mocked_kinit:
+            result = tool.run(app_id="application_1699999999999_0001")
+        mocked_kinit.assert_called_once_with("/x.keytab", "svc@REALM")
+        assert result.status == CheckResult.OK
+    finally:
+        server.shutdown()
+
+
+def test_app_status_kinit_not_called_when_kerberos_disabled():
+    fixture = load_fixture("yarn_app_running.json")
+    server, port = start_mock_server({
+        "/ws/v1/cluster/apps/application_1699999999999_0001": fixture,
+    })
+    try:
+        cfg = {"yarn": {"rm_url": "http://127.0.0.1:{}".format(port)}}
+        tool = AppStatusTool(config=cfg, caps={})
+        with mock.patch("ops.yarn_app.kerberos_utils.kinit") as mocked_kinit:
+            tool.run(app_id="application_1699999999999_0001")
+        mocked_kinit.assert_not_called()
+    finally:
+        server.shutdown()
+
+
+def test_app_status_kinit_falls_back_to_top_level_kerberos():
+    fixture = load_fixture("yarn_app_running.json")
+    server, port = start_mock_server({
+        "/ws/v1/cluster/apps/application_1699999999999_0001": fixture,
+    })
+    try:
+        cfg = {
+            "kerberos": {"enabled": True, "keytab": "/top.keytab", "principal": "top@REALM"},
+            "yarn": {"rm_url": "http://127.0.0.1:{}".format(port)},
+        }
+        tool = AppStatusTool(config=cfg, caps={})
+        with mock.patch("ops.yarn_app.kerberos_utils.kinit") as mocked_kinit:
+            tool.run(app_id="application_1699999999999_0001")
+        mocked_kinit.assert_called_once_with("/top.keytab", "top@REALM")
+    finally:
+        server.shutdown()
+
+
 if __name__ == "__main__":
     tests = [
         test_resolve_url_singular_key,
@@ -207,6 +266,9 @@ if __name__ == "__main__":
         test_app_status_fallback_to_history_hdp,
         test_app_status_fallback_to_timeline_v2_cdp,
         test_app_status_not_found_anywhere,
+        test_app_status_kinit_called_when_kerberos_enabled,
+        test_app_status_kinit_not_called_when_kerberos_disabled,
+        test_app_status_kinit_falls_back_to_top_level_kerberos,
     ]
     failed = 0
     for t in tests:
