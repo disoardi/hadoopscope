@@ -41,6 +41,76 @@ def _status_from_fields(fields):
     return CheckResult.UNKNOWN
 
 
+def _normalize_history_hdp(app):
+    # type: (dict) -> dict
+    """Normalizza la risposta dell'Application History Server v1 (HDP) —
+    shape con chiavi diverse dalla RM REST API (appState invece di state,
+    ecc.)."""
+    return {
+        "state":             app.get("appState", "UNKNOWN"),
+        "finalStatus":       app.get("finalAppStatus", "UNDEFINED"),
+        "progress":          app.get("progress", 0),
+        "applicationType":   app.get("type", ""),
+        "diagnostics":       app.get("diagnosticsInfo", ""),
+        "allocatedMB":       0,
+        "allocatedVCores":   0,
+        "runningContainers": 0,
+        "elapsedTime":       app.get("elapsedTime", 0),
+    }
+
+
+def _normalize_timeline_v2(data):
+    # type: (dict) -> dict
+    """Normalizza la risposta di Timeline Service v2 (CDP) — shape annidata
+    sotto 'info' con chiavi YARN_APPLICATION_*."""
+    info = data.get("info", {})
+    return {
+        "state":             info.get("YARN_APPLICATION_STATE", "UNKNOWN"),
+        "finalStatus":       info.get("YARN_APPLICATION_FINAL_STATUS", "UNDEFINED"),
+        "progress":          info.get("YARN_APPLICATION_PROGRESS", 0),
+        "applicationType":   info.get("YARN_APPLICATION_APPLICATION_TYPE", ""),
+        "diagnostics":       info.get("YARN_APPLICATION_DIAGNOSTICS_INFO", ""),
+        "allocatedMB":       0,
+        "allocatedVCores":   0,
+        "runningContainers": 0,
+        "elapsedTime":       info.get("YARN_APPLICATION_ELAPSED_TIME", 0),
+    }
+
+
+def _query_history_server(config, app_id, no_proxy, use_krb):
+    # type: (dict, str, bool, bool) -> object
+    """Interroga l'Application History Server (HDP) o Timeline Service v2
+    (CDP), a seconda di config['type']. Restituisce dict di campi
+    normalizzati, o None se non configurato/non trovato."""
+    yarn_cfg = config.get("yarn", {})
+    history_url, _ = _resolve_url(yarn_cfg, "history_url", "history_urls")
+    if not history_url:
+        return None
+
+    env_type = config.get("type", "hdp")
+    if env_type == "cdp":
+        path = "{}/ws/v2/timeline/apps/{}".format(history_url, app_id)
+        try:
+            data = _yarn_get(None, path, no_proxy=no_proxy, kerberos=use_krb,
+                             full_path=True)
+        except IOError:
+            return None
+        if not data:
+            return None
+        return _normalize_timeline_v2(data)
+    else:
+        path = "{}/ws/v1/applicationhistory/apps/{}".format(history_url, app_id)
+        try:
+            data = _yarn_get(None, path, no_proxy=no_proxy, kerberos=use_krb,
+                             full_path=True)
+        except IOError:
+            return None
+        app = data.get("app")
+        if not app:
+            return None
+        return _normalize_history_hdp(app)
+
+
 def _message_from_fields(app_id, fields):
     # type: (str, dict) -> str
     msg = "{} — state={} finalStatus={} progress={:.1f}%".format(
@@ -76,23 +146,23 @@ class AppStatusTool(OpsToolBase):
         try:
             data = _yarn_get(base, "apps/{}".format(app_id),
                              no_proxy=no_proxy, kerberos=use_krb)
-        except IOError as e:
-            return CheckResult(
-                name=self.name,
-                status=CheckResult.UNKNOWN,
-                message="{} — app non trovata su RM ({})".format(app_id, str(e))
-            )
+            app = data.get("app")
+        except IOError:
+            app = None
 
-        app = data.get("app")
-        if not app:
-            return CheckResult(
-                name=self.name,
-                status=CheckResult.UNKNOWN,
-                message="{} non trovata su RM (nessun history_url configurato "
-                        "per il fallback)".format(app_id)
-            )
+        if app:
+            fields = _normalize_app_fields(app)
+        else:
+            fields = _query_history_server(self.config, app_id, no_proxy, use_krb)
+            if fields is None:
+                return CheckResult(
+                    name=self.name,
+                    status=CheckResult.UNKNOWN,
+                    message="{} non trovata né su RM né su History Server "
+                            "(id errato o applicazione più vecchia della "
+                            "retention configurata)".format(app_id)
+                )
 
-        fields = _normalize_app_fields(app)
         return CheckResult(
             name=self.name,
             status=_status_from_fields(fields),

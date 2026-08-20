@@ -137,6 +137,58 @@ def test_app_status_no_rm_url_configured():
     assert result.status == CheckResult.SKIPPED
 
 
+def test_app_status_fallback_to_history_hdp():
+    history_fixture = load_fixture("yarn_app_history_hdp.json")
+    server, port = start_mock_server({
+        "/ws/v1/applicationhistory/apps/application_1699999999999_9001": history_fixture,
+        # nessuna route per /ws/v1/cluster/apps/... -> il mock risponde 404
+    })
+    try:
+        base = "http://127.0.0.1:{}".format(port)
+        cfg = {
+            "type": "hdp",
+            "yarn": {"rm_url": base, "history_url": base},
+        }
+        tool = AppStatusTool(config=cfg, caps={})
+        result = tool.run(app_id="application_1699999999999_9001")
+        assert result.status == CheckResult.OK
+        assert result.details["finalStatus"] == "SUCCEEDED"
+    finally:
+        server.shutdown()
+
+
+def test_app_status_fallback_to_timeline_v2_cdp():
+    timeline_fixture = load_fixture("yarn_timeline_v2_cdp.json")
+    server, port = start_mock_server({
+        "/ws/v2/timeline/apps/application_1699999999999_9002": timeline_fixture,
+    })
+    try:
+        base = "http://127.0.0.1:{}".format(port)
+        cfg = {
+            "type": "cdp",
+            "yarn": {"rm_url": base, "history_url": base},
+        }
+        tool = AppStatusTool(config=cfg, caps={})
+        result = tool.run(app_id="application_1699999999999_9002")
+        assert result.status == CheckResult.OK
+        assert result.details["finalStatus"] == "SUCCEEDED"
+        assert result.details["applicationType"] == "SPARK"
+    finally:
+        server.shutdown()
+
+
+def test_app_status_not_found_anywhere():
+    server, port = start_mock_server({})  # nessuna route -> tutto 404
+    try:
+        base = "http://127.0.0.1:{}".format(port)
+        cfg = {"type": "hdp", "yarn": {"rm_url": base, "history_url": base}}
+        tool = AppStatusTool(config=cfg, caps={})
+        result = tool.run(app_id="application_does_not_exist")
+        assert result.status == CheckResult.UNKNOWN
+    finally:
+        server.shutdown()
+
+
 if __name__ == "__main__":
     tests = [
         test_resolve_url_singular_key,
@@ -152,6 +204,9 @@ if __name__ == "__main__":
         test_app_status_succeeded,
         test_app_status_failed,
         test_app_status_no_rm_url_configured,
+        test_app_status_fallback_to_history_hdp,
+        test_app_status_fallback_to_timeline_v2_cdp,
+        test_app_status_not_found_anywhere,
     ]
     failed = 0
     for t in tests:
