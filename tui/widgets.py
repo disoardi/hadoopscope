@@ -132,6 +132,17 @@ def draw_list(win, items, cursor, y, x, h, w, selected=None):
         safe_addstr(win, y + row, x, (prefix + items[idx])[:w], attr)
 
 
+def draw_kv_table(win, rows, y, x, w):
+    # type: (object, list, int, int, int) -> int
+    """Tabella chiave: valore, una riga per coppia (rows: lista di
+    tuple (chiave, valore)). Ritorna la y subito dopo l'ultima riga."""
+    key_w = max((len(str(k)) for k, v in rows), default=10) + 2
+    for i, (k, v) in enumerate(rows):
+        line = "{}{}".format(str(k).ljust(key_w), str(v))
+        safe_addstr(win, y + i, x, line[:w])
+    return y + len(rows)
+
+
 def ask_text(stdscr, prompt, default=""):
     # type: (object, str, str) -> object
     """Prompt testuale a riga singola. ESC annulla (ritorna None)."""

@@ -7,12 +7,32 @@ import curses
 
 from ops import build_ops_registry
 from tui.screens.base import Screen
-from tui.widgets import safe_addstr, draw_list, ask_text, C_OK, C_WARN, C_CRIT, C_DIM
+from tui.widgets import safe_addstr, draw_list, draw_kv_table, ask_text, C_OK, C_WARN, C_CRIT, C_DIM
 
 _STATUS_COLOR = {
     "OK": C_OK, "WARNING": C_WARN, "CRITICAL": C_CRIT,
     "UNKNOWN": C_DIM, "SKIPPED": C_DIM,
 }
+
+# Icona di stato per la testata del risultato. Non si basa solo su
+# CheckResult.status: se details['state'] == 'RUNNING' (tipico di
+# AppStatusTool su un'applicazione YARN ancora in corso), mostra
+# l'icona "in esecuzione" invece del segno di spunta verde — un'app
+# RUNNING non ha "avuto successo", è solo sana in questo momento.
+_ICON_DONE    = ("✓", C_OK)
+_ICON_FAILED  = ("✗", C_CRIT)
+_ICON_RUNNING = ("◐", C_WARN)
+
+
+def _icon_for(status, details):
+    # type: (str, dict) -> tuple
+    if (details or {}).get("state") == "RUNNING":
+        return _ICON_RUNNING
+    if status == "OK":
+        return _ICON_DONE
+    if status == "CRITICAL":
+        return _ICON_FAILED
+    return _ICON_RUNNING  # WARNING/UNKNOWN/SKIPPED: esito non definitivo
 
 
 class OpsToolListScreen(Screen):
@@ -45,7 +65,11 @@ class OpsToolListScreen(Screen):
 
 
 class OpsEnvPickerScreen(Screen):
-    """Selezione dell'environment su cui eseguire il tool scelto."""
+    """Selezione dell'environment, poi esegue subito il tool: prompt dei
+    parametri + run(), tutto sincrono dentro handle_input() — nessuna
+    schermata intermedia "in esecuzione" da attraversare con un tasto a
+    vuoto (bug trovato in test manuale: la vecchia OpsParamInputScreen
+    restava bloccata in attesa di un tasto che non faceva nulla)."""
 
     def __init__(self, app, tool_cls):
         Screen.__init__(self, app)
@@ -68,40 +92,22 @@ class OpsEnvPickerScreen(Screen):
         elif key == curses.KEY_DOWN and self.cursor < len(self.envs) - 1:
             self.cursor += 1
         elif key in (curses.KEY_ENTER, 10, 13):
-            return OpsParamInputScreen(self.app, self.tool_cls, self.envs[self.cursor])
+            return self._run_tool(self.envs[self.cursor])
         return None
 
-
-class OpsParamInputScreen(Screen):
-    """Prompt in sequenza per ogni OpsParam del tool, poi esecuzione."""
-
-    def __init__(self, app, tool_cls, env_name):
-        Screen.__init__(self, app)
-        self.tool_cls = tool_cls
-        self.env_name = env_name
-        self.values = {}  # type: dict
-        self.result_screen = None  # type: object
-
-    def enter(self):
-        # type: () -> None
-        """I prompt testuali usano stdscr direttamente (non c'e' modo
-        pulito di farlo dentro render(), che non ha accesso a getstr()
-        in un ciclo bloccante coerente con l'app loop) — raccolti tutti
-        qui, poi si passa a esecuzione o a un errore mostrato in render()."""
+    def _run_tool(self, env_name):
+        # type: (str) -> object
         stdscr = self.app.stdscr
+        values = {}
         for param in self.tool_cls.params:
             value = ask_text(stdscr, param.help)
             if value is None and param.required:
-                self.result_screen = OpsResultScreen(
-                    self.app, self.tool_cls.name,
-                    status="UNKNOWN", message="Annullato — parametro obbligatorio mancante")
-                return
-            self.values[param.name] = value
-        self.result_screen = self._run()
+                return OpsResultScreen(
+                    self.app, self.tool_cls.name, "UNKNOWN",
+                    "Annullato — parametro obbligatorio mancante", {})
+            values[param.name] = value
 
-    def _run(self):
-        # type: () -> object
-        env_config = self.app.cfg["environments"][self.env_name]
+        env_config = self.app.cfg["environments"][env_name]
         check_config = dict(env_config)
         if "checks" in self.app.cfg:
             check_config["checks"] = self.app.cfg["checks"]
@@ -111,43 +117,40 @@ class OpsParamInputScreen(Screen):
         instance = self.tool_cls(config=check_config, caps=self.app.caps)
         if not instance.can_run():
             return OpsResultScreen(
-                self.app, self.tool_cls.name,
-                status="SKIPPED", message="Requires: {}".format(self.tool_cls.requires))
-        result = instance.run(**self.values)
-        return OpsResultScreen(self.app, self.tool_cls.name, result.status, result.message)
-
-    def render(self, stdscr):
-        # type: (object) -> None
-        safe_addstr(stdscr, 0, 20, "Esecuzione in corso... (premi un tasto)", curses.A_BOLD)
-
-    def handle_input(self, key):
-        # type: (int) -> object
-        """enter() ha già eseguito prompt+run() in modo sincrono prima che
-        questa schermata venisse anche solo disegnata — self.result_screen
-        è quindi già pronto. Qualunque tasto ci transita sopra: senza
-        questo return la schermata resterebbe bloccata per sempre in
-        attesa di un tasto che non fa nulla (bug reale trovato in test
-        manuale — 'app-status' restava su 'Esecuzione in corso...')."""
-        return self.result_screen
+                self.app, self.tool_cls.name, "SKIPPED",
+                "Requires: {}".format(self.tool_cls.requires), {})
+        result = instance.run(**values)
+        return OpsResultScreen(self.app, self.tool_cls.name, result.status,
+                               result.message, result.details)
 
 
 class OpsResultScreen(Screen):
-    """Esito dell'esecuzione — status/message del CheckResult."""
+    """Esito dell'esecuzione — icona di stato + tabella chiave/valore dei
+    details del CheckResult (fallback sul testo del messaggio se il tool
+    non ha prodotto details strutturati, es. errori di configurazione)."""
 
-    def __init__(self, app, tool_name, status, message):
+    def __init__(self, app, tool_name, status, message, details):
         Screen.__init__(self, app)
         self.tool_name = tool_name
         self.status = status
         self.message = message
+        self.details = details or {}
 
     def render(self, stdscr):
         # type: (object) -> None
-        attr = curses.color_pair(_STATUS_COLOR.get(self.status, C_DIM)) | curses.A_BOLD
-        safe_addstr(stdscr, 0, 20, "OPS — {} — {}".format(self.tool_name, self.status), attr)
-        y = 2
-        for line in self.message.splitlines():
-            safe_addstr(stdscr, y, 20, line[:80])
-            y += 1
+        icon, icon_color = _icon_for(self.status, self.details)
+        attr = curses.color_pair(icon_color) | curses.A_BOLD
+        safe_addstr(stdscr, 0, 20, "OPS — {} — {} {}".format(self.tool_name, icon, self.status), attr)
+
+        rows = [(k, v) for k, v in self.details.items() if k != "counters"]
+        if rows:
+            y = draw_kv_table(stdscr, rows, y=2, x=20, w=70)
+        else:
+            y = 2
+            for line in self.message.splitlines():
+                safe_addstr(stdscr, y, 20, line[:80])
+                y += 1
+
         safe_addstr(stdscr, y + 1, 20, "ESC torna alla lista tool", curses.color_pair(C_DIM))
 
     def handle_input(self, key):
