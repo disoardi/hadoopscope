@@ -14,6 +14,8 @@ test_files = [
     os.path.join(TESTS_DIR, "test_base.py"),
     os.path.join(TESTS_DIR, "test_config.py"),
     os.path.join(TESTS_DIR, "test_checks.py"),
+    os.path.join(TESTS_DIR, "test_applog.py"),
+    os.path.join(TESTS_DIR, "test_ops.py"),
 ]
 
 total_failed = 0
