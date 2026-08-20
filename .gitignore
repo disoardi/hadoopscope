@@ -34,6 +34,9 @@ poetry.toml
 # Contesto locale — note operative cliente/ambiente, mai committato
 .claude/local/
 
+# Brainstorming companion (mockup temporanei, non versionati)
+.superpowers/
+
 # IDE
 .idea/
 .vscode/
