@@ -17,6 +17,7 @@ from bootstrap import discover_capabilities, ensure_ansible, print_capabilities
 from checks.base import CheckResult
 import debug as _debug
 import applog as _applog
+from ops import build_ops_registry
 
 # Stato del run corrente, aggiornato da run_checks_for_env — letto dal signal
 # handler per loggare un'interruzione esplicita invece di un RUN START orfano
@@ -114,14 +115,6 @@ def build_check_registry(env_config, caps):
             YarnQueueCheck,
         ],
     }
-
-
-def build_ops_registry():
-    # type: () -> dict
-    """Registry dei tool Ops disponibili, per nome."""
-    from ops.yarn_app import AppStatusTool, AppLogsTool
-    tools = [AppStatusTool, AppLogsTool]
-    return {cls.name: cls for cls in tools}
 
 
 def build_ops_arg_parser():
