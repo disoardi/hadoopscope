@@ -21,6 +21,7 @@ def _open_url(req, timeout, no_proxy=False):
     return urlopen(req, timeout=timeout)
 
 from checks.base import CheckBase, CheckResult
+import kerberos_utils
 
 DEFAULT_TIMEOUT = 10
 DEFAULT_RM_PORT = 8088
@@ -125,9 +126,36 @@ def _rm_url(config):
         return None, True
 
 
+def _resolve_kerberos_cfg(config):
+    # type: (dict) -> dict
+    """Config Kerberos per YARN: yarn.kerberos ha priorità sul blocco
+    kerberos top-level (stessa convenzione già usata da webhdfs.kerberos
+    verso kerberos — override specifico del servizio se presente)."""
+    yarn_krb = config.get("yarn", {}).get("kerberos", {})
+    top_krb = config.get("kerberos", {})
+    return yarn_krb if yarn_krb.get("enabled") else top_krb
+
+
+def _yarn_kinit_if_needed(config):
+    # type: (dict) -> tuple
+    """Se kerberos e' abilitato per YARN, ottiene un ticket via kinit
+    locale prima delle chiamate REST (necessario per run non interattivi
+    da crontab, dove non si puo' assumere un ticket gia' in cache).
+    Restituisce (use_kerberos, error_message_or_None)."""
+    krb_cfg = _resolve_kerberos_cfg(config)
+    use_krb = krb_cfg.get("enabled", False)
+    if not use_krb:
+        return False, None
+    try:
+        kerberos_utils.kinit(krb_cfg.get("keytab"), krb_cfg.get("principal"))
+    except IOError as e:
+        return True, str(e)
+    return True, None
+
+
 def _yarn_get(base_url, path, timeout=DEFAULT_TIMEOUT, no_proxy=False,
-              kerberos=False, full_path=False):
-    # type: (str, str, int, bool, bool, bool) -> dict
+              kerberos=False, full_path=False, ssl_insecure=False):
+    # type: (str, str, int, bool, bool, bool, bool) -> dict
     """GET REST verso YARN. Se full_path=False (default, comportamento
     esistente), il path è relativo a /ws/v1/cluster/. Se full_path=True,
     'path' è già l'URL completo (usato per l'Application History/Timeline
@@ -142,6 +170,8 @@ def _yarn_get(base_url, path, timeout=DEFAULT_TIMEOUT, no_proxy=False,
                "-H", "Accept: application/json"]
         if no_proxy:
             cmd += ["--noproxy", "*"]
+        if ssl_insecure:
+            cmd.append("--insecure")
         cmd.append(url)
         try:
             out = subprocess.check_output(cmd, stderr=subprocess.PIPE,
@@ -209,7 +239,13 @@ class YarnNodeHealthCheck(CheckBase):
                 message="yarn.rm_url not configured — add yarn.rm_url to config"
             )
         no_proxy  = self.config.get("no_proxy", False)
-        use_krb   = self.config.get("kerberos", {}).get("enabled", False)
+        use_krb, krb_err = _yarn_kinit_if_needed(self.config)
+        if krb_err:
+            return CheckResult(
+                name="YarnNodeHealth",
+                status=CheckResult.UNKNOWN,
+                message="kinit fallito: {}".format(krb_err)
+            )
         yarn_cfg  = self.config.get("yarn", {})
 
         # Manual list from config (always respected)
@@ -221,8 +257,10 @@ class YarnNodeHealthCheck(CheckBase):
         if self.config.get("cm_url"):
             decom_set |= _cm_decommissioned_hosts(self.config)
 
+        ssl_insecure = yarn_cfg.get("ssl_insecure", False)
         try:
-            data = _yarn_get(base, "nodes", no_proxy=no_proxy, kerberos=use_krb)
+            data = _yarn_get(base, "nodes", no_proxy=no_proxy, kerberos=use_krb,
+                             ssl_insecure=ssl_insecure)
         except IOError as e:
             msg = str(e)
             if is_auto:
@@ -310,13 +348,21 @@ class YarnQueueCheck(CheckBase):
                 message="yarn.rm_url not configured — add yarn.rm_url to config"
             )
         no_proxy = self.config.get("no_proxy", False)
-        use_krb  = self.config.get("kerberos", {}).get("enabled", False)
+        use_krb, krb_err = _yarn_kinit_if_needed(self.config)
+        if krb_err:
+            return CheckResult(
+                name="YarnQueues",
+                status=CheckResult.UNKNOWN,
+                message="kinit fallito: {}".format(krb_err)
+            )
         yarn_cfg = self.config.get("checks", {}).get("yarn_queues", {})
         warn_pct = float(yarn_cfg.get("usage_warning_pct", 80))
         crit_pct = float(yarn_cfg.get("usage_critical_pct", 90))
+        ssl_insecure = self.config.get("yarn", {}).get("ssl_insecure", False)
 
         try:
-            data = _yarn_get(base, "scheduler", no_proxy=no_proxy, kerberos=use_krb)
+            data = _yarn_get(base, "scheduler", no_proxy=no_proxy, kerberos=use_krb,
+                             ssl_insecure=ssl_insecure)
         except IOError as e:
             msg = str(e)
             if is_auto:
@@ -396,10 +442,18 @@ class YarnClusterMetricsCheck(CheckBase):
                 message="yarn.rm_url not configured — add yarn.rm_url to config"
             )
         no_proxy = self.config.get("no_proxy", False)
-        use_krb  = self.config.get("kerberos", {}).get("enabled", False)
+        use_krb, krb_err = _yarn_kinit_if_needed(self.config)
+        if krb_err:
+            return CheckResult(
+                name="YarnClusterMetrics",
+                status=CheckResult.UNKNOWN,
+                message="kinit fallito: {}".format(krb_err)
+            )
 
+        ssl_insecure = self.config.get("yarn", {}).get("ssl_insecure", False)
         try:
-            data = _yarn_get(base, "metrics", no_proxy=no_proxy, kerberos=use_krb)
+            data = _yarn_get(base, "metrics", no_proxy=no_proxy, kerberos=use_krb,
+                             ssl_insecure=ssl_insecure)
         except IOError as e:
             msg = str(e)
             if is_auto:

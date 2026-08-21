@@ -7,10 +7,9 @@ import os
 import re
 
 from checks.base import CheckResult
-from checks.yarn import _rm_url, _resolve_url, _yarn_get
+from checks.yarn import _rm_url, _resolve_url, _yarn_get, _yarn_kinit_if_needed
 from ops.base import OpsParam, OpsToolBase
 import ansible_runner
-import kerberos_utils
 
 _TERMINAL_STATUS_MAP = {
     "SUCCEEDED": CheckResult.OK,
@@ -97,7 +96,7 @@ def _query_history_server(config, app_id, no_proxy, use_krb):
         path = "{}/ws/v2/timeline/apps/{}".format(history_url, app_id)
         try:
             data = _yarn_get(None, path, no_proxy=no_proxy, kerberos=use_krb,
-                             full_path=True)
+                             full_path=True, ssl_insecure=yarn_cfg.get("ssl_insecure", False))
         except IOError:
             return None
         if not data:
@@ -107,7 +106,7 @@ def _query_history_server(config, app_id, no_proxy, use_krb):
         path = "{}/ws/v1/applicationhistory/apps/{}".format(history_url, app_id)
         try:
             data = _yarn_get(None, path, no_proxy=no_proxy, kerberos=use_krb,
-                             full_path=True)
+                             full_path=True, ssl_insecure=yarn_cfg.get("ssl_insecure", False))
         except IOError:
             return None
         app = data.get("app")
@@ -145,7 +144,7 @@ def _fetch_counters_best_effort(config, app_id, app_type, no_proxy, use_krb):
 
     try:
         data = _yarn_get(None, path, no_proxy=no_proxy, kerberos=use_krb,
-                         full_path=True)
+                         full_path=True, ssl_insecure=yarn_cfg.get("ssl_insecure", False))
         return data
     except IOError:
         return None
@@ -181,24 +180,18 @@ class AppStatusTool(OpsToolBase):
             )
 
         no_proxy = self.config.get("no_proxy", False)
-        yarn_krb = self.config.get("yarn", {}).get("kerberos", {})
-        top_krb  = self.config.get("kerberos", {})
-        krb_cfg  = yarn_krb if yarn_krb.get("enabled") else top_krb
-        use_krb  = krb_cfg.get("enabled", False)
+        use_krb, krb_err = _yarn_kinit_if_needed(self.config)
+        if krb_err:
+            return CheckResult(
+                name=self.name,
+                status=CheckResult.UNKNOWN,
+                message="kinit fallito: {}".format(krb_err)
+            )
 
-        if use_krb:
-            try:
-                kerberos_utils.kinit(krb_cfg.get("keytab"), krb_cfg.get("principal"))
-            except IOError as e:
-                return CheckResult(
-                    name=self.name,
-                    status=CheckResult.UNKNOWN,
-                    message="kinit fallito: {}".format(str(e))
-                )
-
+        ssl_insecure = self.config.get("yarn", {}).get("ssl_insecure", False)
         try:
             data = _yarn_get(base, "apps/{}".format(app_id),
-                             no_proxy=no_proxy, kerberos=use_krb)
+                             no_proxy=no_proxy, kerberos=use_krb, ssl_insecure=ssl_insecure)
             app = data.get("app")
         except IOError:
             app = None

@@ -209,7 +209,7 @@ def test_app_status_kinit_called_when_kerberos_enabled():
             },
         }
         tool = AppStatusTool(config=cfg, caps={})
-        with mock.patch("ops.yarn_app.kerberos_utils.kinit") as mocked_kinit:
+        with mock.patch("checks.yarn.kerberos_utils.kinit") as mocked_kinit:
             result = tool.run(app_id="application_1699999999999_0001")
         mocked_kinit.assert_called_once_with("/x.keytab", "svc@REALM")
         assert result.status == CheckResult.OK
@@ -225,7 +225,7 @@ def test_app_status_kinit_not_called_when_kerberos_disabled():
     try:
         cfg = {"yarn": {"rm_url": "http://127.0.0.1:{}".format(port)}}
         tool = AppStatusTool(config=cfg, caps={})
-        with mock.patch("ops.yarn_app.kerberos_utils.kinit") as mocked_kinit:
+        with mock.patch("checks.yarn.kerberos_utils.kinit") as mocked_kinit:
             tool.run(app_id="application_1699999999999_0001")
         mocked_kinit.assert_not_called()
     finally:
@@ -243,7 +243,7 @@ def test_app_status_kinit_falls_back_to_top_level_kerberos():
             "yarn": {"rm_url": "http://127.0.0.1:{}".format(port)},
         }
         tool = AppStatusTool(config=cfg, caps={})
-        with mock.patch("ops.yarn_app.kerberos_utils.kinit") as mocked_kinit:
+        with mock.patch("checks.yarn.kerberos_utils.kinit") as mocked_kinit:
             tool.run(app_id="application_1699999999999_0001")
         mocked_kinit.assert_called_once_with("/top.keytab", "top@REALM")
     finally:
