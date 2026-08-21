@@ -4,9 +4,10 @@ from __future__ import print_function
 
 import json
 import socket
+import ssl
 
 try:
-    from urllib.request import urlopen, Request, build_opener, ProxyHandler
+    from urllib.request import urlopen, Request, build_opener, ProxyHandler, HTTPSHandler
     from urllib.error import URLError, HTTPError
     import base64 as _base64
     def _make_auth_header(user, passwd):
@@ -15,18 +16,24 @@ try:
         ).decode()
         return "Basic {}".format(token)
 except ImportError:
-    from urllib2 import urlopen, Request, build_opener, ProxyHandler, URLError, HTTPError
+    from urllib2 import urlopen, Request, build_opener, ProxyHandler, HTTPSHandler, URLError, HTTPError
     import base64 as _base64
     def _make_auth_header(user, passwd):
         token = _base64.b64encode("{}:{}".format(user, passwd))
         return "Basic {}".format(token)
 
 
-def _cm_open(req, timeout, no_proxy=False):
-    # type: (Request, int, bool) -> object
-    """Open CM API request, optionally bypassing system HTTP proxy."""
+def _cm_open(req, timeout, no_proxy=False, ssl_insecure=False):
+    # type: (Request, int, bool, bool) -> object
+    """Open CM API request, optionally bypassing system HTTP proxy and/or
+    skipping TLS certificate verification (Auto-TLS/self-signed CM)."""
+    handlers = []
     if no_proxy:
-        return build_opener(ProxyHandler({})).open(req, timeout=timeout)
+        handlers.append(ProxyHandler({}))
+    if ssl_insecure:
+        handlers.append(HTTPSHandler(context=ssl._create_unverified_context()))
+    if handlers:
+        return build_opener(*handlers).open(req, timeout=timeout)
     return urlopen(req, timeout=timeout)
 
 from checks.base import CheckBase, CheckResult
@@ -38,13 +45,14 @@ class ClouderaClient(object):
     """Client HTTP minimale per Cloudera Manager REST API. Zero deps."""
 
     def __init__(self, base_url, user, password, cluster_name, api_version="v40",
-                 no_proxy=False):
-        # type: (str, str, str, str, str, bool) -> None
+                 no_proxy=False, ssl_insecure=False):
+        # type: (str, str, str, str, str, bool, bool) -> None
         self.base_url     = base_url.rstrip("/")
         self.auth_header  = _make_auth_header(user, password)
         self.cluster_name = cluster_name
         self.api_version  = api_version
         self.no_proxy     = no_proxy
+        self.ssl_insecure = ssl_insecure
 
     def get(self, path):
         # type: (str) -> dict
@@ -55,7 +63,8 @@ class ClouderaClient(object):
         req.add_header("Authorization", self.auth_header)
         req.add_header("Accept", "application/json")
         try:
-            resp = _cm_open(req, timeout=TIMEOUT, no_proxy=self.no_proxy)
+            resp = _cm_open(req, timeout=TIMEOUT, no_proxy=self.no_proxy,
+                            ssl_insecure=self.ssl_insecure)
             return json.loads(resp.read().decode("utf-8"))
         except HTTPError as e:
             raise IOError("CM HTTP {}: {} — {}".format(e.code, e.reason, url))
@@ -72,7 +81,8 @@ class ClouderaClient(object):
         req.add_header("Authorization", self.auth_header)
         req.add_header("Accept", "application/json")
         try:
-            resp = _cm_open(req, timeout=TIMEOUT, no_proxy=self.no_proxy)
+            resp = _cm_open(req, timeout=TIMEOUT, no_proxy=self.no_proxy,
+                            ssl_insecure=self.ssl_insecure)
             return json.loads(resp.read().decode("utf-8"))
         except HTTPError as e:
             raise IOError("CM HTTP {}: {} — {}".format(e.code, e.reason, url))
@@ -91,6 +101,7 @@ def _make_cm_client(config):
         cluster_name = config["cluster_name"],
         api_version  = config.get("cm_api_version", "v40"),
         no_proxy     = config.get("no_proxy", False),
+        ssl_insecure = config.get("ssl_insecure", False),
     )
 
 
