@@ -122,6 +122,18 @@ class App(object):
                     stack[-1].enter()
             elif result is not None:
                 self.current_stack().append(result)
+                # Disegna subito la nuova schermata (es. "Esecuzione in
+                # corso...") PRIMA di chiamare enter(), che per alcune
+                # schermate (MonitoringRunScreen) e' una chiamata di rete
+                # sincrona e bloccante — altrimenti l'utente resta a
+                # guardare la schermata precedente congelata, senza alcun
+                # feedback, per tutta la durata reale dei check (bug
+                # riportato: "sembra bloccato sulla pagina di selezione").
+                self.stdscr.erase()
+                draw_frame(self.stdscr, title="HADOOPSCOPE")
+                draw_sidebar(self.stdscr, TABS, self.active_tab)
+                result.render(self.stdscr)
+                self.stdscr.refresh()
                 result.enter()
 
 
