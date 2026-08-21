@@ -53,12 +53,14 @@ class MonitoringEnvPickerScreen(Screen):
     def __init__(self, app):
         Screen.__init__(self, app)
         self.cursor = 0
-        self.envs = sorted(app.cfg.get("environments", {}).keys())
+        self.envs = sorted(app.envs.keys())
         self.selected = set()
 
     def render(self, stdscr):
         # type: (object) -> None
-        safe_addstr(stdscr, 0, 20, "MONITORING — scegli environment (SPAZIO seleziona, INVIO conferma)", curses.A_BOLD)
+        safe_addstr(stdscr, 0, 20,
+                   "MONITORING — scegli environment (SPAZIO seleziona, A tutti/nessuno, INVIO conferma)",
+                   curses.A_BOLD)
         draw_list(stdscr, self.envs, self.cursor, y=2, x=20, h=15, w=50, selected=self.selected)
 
     def handle_input(self, key):
@@ -74,6 +76,11 @@ class MonitoringEnvPickerScreen(Screen):
                 self.selected.discard(self.cursor)
             else:
                 self.selected.add(self.cursor)
+        elif key in (ord("a"), ord("A")):
+            if len(self.selected) == len(self.envs):
+                self.selected.clear()
+            else:
+                self.selected = set(range(len(self.envs)))
         elif key in (curses.KEY_ENTER, 10, 13) and self.selected:
             chosen = [self.envs[i] for i in sorted(self.selected)]
             return MonitoringCheckPickerScreen(self.app, chosen)
@@ -92,7 +99,9 @@ class MonitoringCheckPickerScreen(Screen):
 
     def render(self, stdscr):
         # type: (object) -> None
-        safe_addstr(stdscr, 0, 20, "MONITORING — scegli check (SPAZIO seleziona, INVIO conferma)", curses.A_BOLD)
+        safe_addstr(stdscr, 0, 20,
+                   "MONITORING — scegli check (SPAZIO seleziona, A tutti/nessuno, INVIO conferma)",
+                   curses.A_BOLD)
         items = [label for key, label in self.categories]
         draw_list(stdscr, items, self.cursor, y=2, x=20, h=10, w=60, selected=self.selected)
 
@@ -107,6 +116,11 @@ class MonitoringCheckPickerScreen(Screen):
                 self.selected.discard(self.cursor)
             else:
                 self.selected.add(self.cursor)
+        elif key in (ord("a"), ord("A")):
+            if len(self.selected) == len(self.categories):
+                self.selected.clear()
+            else:
+                self.selected = set(range(len(self.categories)))
         elif key in (curses.KEY_ENTER, 10, 13) and self.selected:
             checks = [self.categories[i][0] for i in sorted(self.selected)]
             return MonitoringRunScreen(self.app, self.app_envs, checks)
@@ -132,8 +146,12 @@ class MonitoringRunScreen(Screen):
         args.dry_run = False
 
         for env_name in self.envs:
-            env_config = self.app.cfg["environments"][env_name]
-            results = run_checks_for_env(env_name, env_config, self.app.cfg, self.app.caps, args)
+            # env_config/global vengono dal file di origine di QUESTO
+            # specifico environment — isolamento esplicito tra clienti
+            # diversi caricati nella stessa sessione TUI.
+            env_config = self.app.envs[env_name]
+            env_cfg_global = self.app.env_global[env_name]
+            results = run_checks_for_env(env_name, env_config, env_cfg_global, self.app.caps, args)
             self.results_by_env[env_name] = results
             for r in results:
                 _applog.log_result(r)
@@ -175,12 +193,25 @@ class MonitoringScheduleAddScreen(Screen):
 
     def enter(self):
         # type: () -> None
+        # Una entry crontab ha un solo --config: se gli env selezionati
+        # vengono da file diversi (client diversi caricati nella stessa
+        # sessione TUI), non c'è un path unico corretto da usare — meglio
+        # bloccare con un messaggio chiaro che schedulare qualcosa di sbagliato.
+        files = set(self.app.env_file[e] for e in self.envs)
+        if len(files) > 1:
+            self.done_message = (
+                "Impossibile schedulare insieme environment di file diversi ({}) "
+                "— schedula separatamente per ciascun file.".format(", ".join(sorted(files)))
+            )
+            return
+        config_path = files.pop()
+
         cron_expr = ask_text(self.app.stdscr, "Espressione cron (es. */15 * * * *)", "*/15 * * * *")
         if not cron_expr:
             self.done_message = "Annullato."
             return
         entry = {
-            "config": self.app.config_path,
+            "config": config_path,
             "envs": self.envs,
             "checks": ",".join(self.checks),
             "cron": cron_expr,

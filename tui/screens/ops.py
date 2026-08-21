@@ -75,7 +75,7 @@ class OpsEnvPickerScreen(Screen):
         Screen.__init__(self, app)
         self.tool_cls = tool_cls
         self.cursor = 0
-        self.envs = sorted(app.cfg.get("environments", {}).keys())
+        self.envs = sorted(app.envs.keys())
 
     def render(self, stdscr):
         # type: (object) -> None
@@ -114,12 +114,16 @@ class OpsEnvPickerScreen(Screen):
                     "Annullato — parametro obbligatorio mancante", {})
             values[param.name] = value
 
-        env_config = self.app.cfg["environments"][env_name]
+        # checks:/alerts:/download_dir vengono dal file di origine di
+        # QUESTO specifico environment, mai da altri file caricati nella
+        # stessa sessione — isolamento esplicito tra clienti diversi.
+        env_config = self.app.envs[env_name]
+        env_cfg_global = self.app.env_global[env_name]
         check_config = dict(env_config)
-        if "checks" in self.app.cfg:
-            check_config["checks"] = self.app.cfg["checks"]
-        if "download_dir" in self.app.cfg:
-            check_config["download_dir"] = self.app.cfg["download_dir"]
+        if "checks" in env_cfg_global:
+            check_config["checks"] = env_cfg_global["checks"]
+        if "download_dir" in env_cfg_global:
+            check_config["download_dir"] = env_cfg_global["download_dir"]
 
         instance = self.tool_cls(config=check_config, caps=self.app.caps)
         if not instance.can_run():

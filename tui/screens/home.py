@@ -25,7 +25,7 @@ class HomeGridScreen(Screen):
 
     def enter(self):
         # type: () -> None
-        configured = sorted(self.app.cfg.get("environments", {}).keys())
+        configured = sorted(self.app.envs.keys())
         summary_by_env = {row["env"]: row for row in state_store.get_all_envs_summary()}
         self.envs = []
         for env in configured:
