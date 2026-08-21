@@ -299,3 +299,84 @@ class ClouderaNameNodeHACheck(CheckBase):
                 ", ".join(active), ", ".join(standby)),
             details={"active": active, "standby": standby}
         )
+
+
+class ClouderaClusterInfoCheck(CheckBase):
+    """Informazioni versione — CM, CDP, e presenza/versione di un eventuale
+    cluster CDP Private Cloud Data Services (ECS) registrato sulla stessa
+    Cloudera Manager. Puramente informativo per la dashboard 'at a
+    glance': nessuna soglia, sempre OK se raggiungibile — non è un check
+    di salute.
+
+    Il cluster Data Services NON compare in GET /clusters (l'endpoint di
+    lista lo filtra) — va scoperto enumerando gli host (campo
+    clusterRef.clusterName su GET /hosts) e poi interrogato per nome con
+    GET /clusters/{name}. clusterType == "EXPERIENCE_CLUSTER" identifica
+    CDP Private Cloud Data Services — verificato contro un ambiente reale
+    (MdS dev: cluster "dsDEV", versione 1.5.5). Qualunque altro
+    clusterType inatteso viene comunque segnalato con il valore raw, per
+    non nascondere sorprese su ambienti diversi.
+    """
+
+    requires = []
+
+    def run(self):
+        # type: () -> CheckResult
+        cluster_name = self.config.get("cluster_name")
+        try:
+            client       = _make_cm_client(self.config)
+            cm_version   = client.get_raw("cm/version")
+            this_cluster = client.get_raw("clusters/{}".format(cluster_name))
+            hosts        = client.get_raw("hosts?view=full")
+        except IOError as e:
+            return CheckResult(
+                name="ClouderaClusterInfo",
+                status=CheckResult.UNKNOWN,
+                message=str(e)
+            )
+
+        extra_names = set()
+        for h in hosts.get("items", []):
+            ref  = h.get("clusterRef") or {}
+            name = ref.get("clusterName")
+            if name and name != cluster_name:
+                extra_names.add(name)
+
+        data_services = []
+        for name in sorted(extra_names):
+            try:
+                c = client.get_raw("clusters/{}".format(name))
+            except IOError:
+                continue
+            data_services.append({
+                "name":        name,
+                "clusterType": c.get("clusterType", "?"),
+                "version":     c.get("fullVersion", "?"),
+            })
+
+        details = {
+            "cm_version":    cm_version.get("version", "?"),
+            "cdp_version":   this_cluster.get("fullVersion", "?"),
+            "data_services": bool(data_services),
+        }
+        if data_services:
+            details["data_services_clusters"] = data_services
+
+        msg = "CM {} — CDP {}".format(details["cm_version"], details["cdp_version"])
+        if data_services:
+            ds_str = ", ".join(
+                "{} ({})".format(d["name"], d["version"])
+                if d["clusterType"] == "EXPERIENCE_CLUSTER"
+                else "{} ({}, {})".format(d["name"], d["clusterType"], d["version"])
+                for d in data_services
+            )
+            msg += " — Data Services: {}".format(ds_str)
+        else:
+            msg += " — nessun servizio Data Services rilevato"
+
+        return CheckResult(
+            name="ClouderaClusterInfo",
+            status=CheckResult.OK,
+            message=msg,
+            details=details
+        )

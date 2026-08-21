@@ -26,7 +26,7 @@ from checks.ambari import (
 )
 from checks.webhdfs import HdfsDataNodeCheck, HdfsSpaceCheck
 from checks.yarn import YarnNodeHealthCheck, YarnQueueCheck, YarnClusterMetricsCheck
-from checks.cloudera import ClouderaServiceHealthCheck
+from checks.cloudera import ClouderaServiceHealthCheck, ClouderaClusterInfoCheck
 from checks.hive import (
     _build_beeline_url, _build_beeline_cmd, _merge_ns_cfg, _zk_host_str, _label_from_cfg,
     _extract_stdout, _extract_stderr, _parse_databases_output, _parse_partition_output,
@@ -922,6 +922,67 @@ def test_cloudera_service_ok():
         server.shutdown()
 
 
+def test_cloudera_cluster_info_with_data_services():
+    route_map = {
+        "/api/v40/cm/version":              load_fixture("cloudera_cm_version.json"),
+        "/api/v40/clusters/dsDEV":           load_fixture("cloudera_cluster_ds.json"),
+        "/api/v40/clusters/test-cluster":    load_fixture("cloudera_cluster_base.json"),
+        "/api/v40/hosts":                   load_fixture("cloudera_hosts_with_ds.json"),
+    }
+    server, port = start_mock_server(route_map)
+    config = {
+        "cm_url": "http://127.0.0.1:{}".format(port),
+        "cm_user": "admin", "cm_pass": "admin",
+        "cluster_name": "test-cluster", "cm_api_version": "v40",
+    }
+    try:
+        check  = ClouderaClusterInfoCheck(config, {})
+        result = check.run()
+        assert result.status == CheckResult.OK, "{}: {}".format(result.status, result.message)
+        assert result.details["cm_version"] == "7.11.3"
+        assert result.details["cdp_version"] == "7.1.7"
+        assert result.details["data_services"] is True
+        ds = result.details["data_services_clusters"]
+        assert ds == [{"name": "dsDEV", "clusterType": "EXPERIENCE_CLUSTER", "version": "1.5.5"}]
+        assert "Data Services: dsDEV (1.5.5)" in result.message
+    finally:
+        server.shutdown()
+
+
+def test_cloudera_cluster_info_without_data_services():
+    route_map = {
+        "/api/v40/cm/version":           load_fixture("cloudera_cm_version.json"),
+        "/api/v40/clusters/test-cluster": load_fixture("cloudera_cluster_base.json"),
+        "/api/v40/hosts":                load_fixture("cloudera_hosts_no_ds.json"),
+    }
+    server, port = start_mock_server(route_map)
+    config = {
+        "cm_url": "http://127.0.0.1:{}".format(port),
+        "cm_user": "admin", "cm_pass": "admin",
+        "cluster_name": "test-cluster", "cm_api_version": "v40",
+    }
+    try:
+        check  = ClouderaClusterInfoCheck(config, {})
+        result = check.run()
+        assert result.status == CheckResult.OK, "{}: {}".format(result.status, result.message)
+        assert result.details["data_services"] is False
+        assert "data_services_clusters" not in result.details
+        assert "nessun servizio Data Services rilevato" in result.message
+    finally:
+        server.shutdown()
+
+
+def test_cloudera_cluster_info_connection_error():
+    config = {
+        "cm_url": "http://127.0.0.1:19998",
+        "cm_user": "admin", "cm_pass": "admin",
+        "cluster_name": "test-cluster", "cm_api_version": "v40",
+    }
+    check  = ClouderaClusterInfoCheck(config, {})
+    result = check.run()
+    assert result.status == CheckResult.UNKNOWN
+
+
 # ---------------------------------------------------------------------------
 # Test: config.py manual YAML parser
 # ---------------------------------------------------------------------------
@@ -1619,6 +1680,9 @@ if __name__ == "__main__":
         test_yarn_cluster_metrics_connection_error,
         test_yarn_connection_error_suggests_rm_url,
         test_cloudera_service_ok,
+        test_cloudera_cluster_info_with_data_services,
+        test_cloudera_cluster_info_without_data_services,
+        test_cloudera_cluster_info_connection_error,
         test_config_manual_parser,
         test_config_load_test_yaml,
         test_beeline_url_direct,

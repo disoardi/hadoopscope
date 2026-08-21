@@ -1,0 +1,7 @@
+{
+  "name": "test-cluster",
+  "displayName": "test-cluster",
+  "fullVersion": "7.1.7",
+  "entityStatus": "GOOD_HEALTH",
+  "clusterType": "BASE_CLUSTER"
+}

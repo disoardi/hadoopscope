@@ -83,7 +83,8 @@ def build_check_registry(env_config, caps):
     from checks.yarn import YarnNodeHealthCheck, YarnQueueCheck, YarnClusterMetricsCheck
     from checks.hive import HiveCheck, HivePartitionCheck
     from checks.cloudera import (
-        ClouderaServiceHealthCheck, ClouderaParcelCheck, ClouderaNameNodeHACheck
+        ClouderaServiceHealthCheck, ClouderaParcelCheck, ClouderaNameNodeHACheck,
+        ClouderaClusterInfoCheck,
     )
 
     env_type = env_config.get("type", "hdp")
@@ -93,6 +94,7 @@ def build_check_registry(env_config, caps):
             ClouderaServiceHealthCheck,
             ClouderaParcelCheck,
             ClouderaNameNodeHACheck,
+            ClouderaClusterInfoCheck,
         ]
     else:
         health_checks = [
