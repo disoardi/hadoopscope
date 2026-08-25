@@ -356,6 +356,62 @@ Le entry gestite da `_step_crontab_manager` in `cluster_status.py` seguono quest
 - Entry **disabilitata**: la riga di comando viene commentata con `# ` (il marker rimane attivo)
 - Parse/format in `_parse_hs_block` / `_format_hs_block`
 
+### Ansible + target con Python vecchio — usare `raw`, non `shell`/`command`/`copy`
+ansible-core recente (2.14+) ha smesso di supportare managed node con Python < 3.8
+per i moduli standard (`shell`, `command`, `copy`, `file`, ecc. — passano dal sistema
+AnsiballZ, che richiede Python compatibile sul target). Se l'edge node ha Python
+vecchio (2.7 su HDP datati, 3.6 su alcuni CDP), il modulo `raw` esegue il comando via
+SSH senza passare da AnsiballZ — zero dipendenza dalla versione Python remota.
+Sintomo tipico: `"Module result deserialization failed"` o
+`"Failed to get information on remote file"` invece di un errore Python leggibile.
+**Recidivo**: questo fix è stato applicato una prima volta in `ansible_runner.py`
+(layer Ops) ma è ricomparso identico in `checks/webhdfs.py::_run_ansible_curl` e
+`checks/hive.py::_run_playbook_with_sql`, playbook builder distinti che non riusano
+lo stesso codice. **Prima di aggiungere un nuovo playbook builder** (o quando questo
+sintomo si ripresenta), `grep -rn "shell:\|copy:\|^\s*- name:.*\n\s*file:" checks/
+tui/` e verifica che ogni task usi `raw:`, non solo quello appena toccato.
+
+### Ansible `raw` + comando che esce non-zero per motivi legittimi
+Un comando eseguito via `raw` che esce con `rc=255` (es. `yarn logs` senza log
+trovati) viene scambiato da Ansible per un fallimento SSH (UNREACHABLE, stesso
+codice usato da OpenSSH per errori di connessione) — l'output reale del comando
+viene scartato.
+**Fix**: pattern sentinel — lo script cattura il vero exit code in una variabile,
+lo stampa con un marker univoco, e termina sempre con `exit 0` verso Ansible; il
+chiamante interpreta il codice vero dal marker nello stdout invece di fidarsi del
+codice di ritorno di ansible-playbook.
+
+### Cron job spariti dopo un reboot senza errori — controllare ORPHAN di crond
+Se job schedulati via crontab utente smettono di girare dopo un riavvio macchina,
+senza errori in `/var/log/messages` né nei log applicativi, controllare
+`journalctl -u crond` per righe `(username) ORPHAN (no passwd entry)`. crond marca
+un crontab orphan se non risolve l'owner in `/etc/passwd` al momento del
+caricamento (tipico se l'identity management è centralizzato — LDAP/SSSD — e non è
+ancora pronto nei primissimi istanti del boot, quando crond parte). Un crontab
+orphan **non viene mai ricontrollato** finché lo spool non cambia o crond non
+riparte — anche se l'identity service torna disponibile dopo pochi secondi.
+**Fix**: `systemctl restart crond` dopo che l'identity service è confermato up.
+
+### CDP Private Cloud Data Services (ECS) non compare in `GET /clusters`
+Il cluster Data Services **non compare** nell'endpoint di lista `GET /api/vXX/clusters`
+(viene filtrato), anche se esiste ed è pienamente funzionante. Va scoperto enumerando
+gli host (`clusterRef.clusterName` su `GET /hosts?view=full`) e poi interrogato per
+nome diretto (`GET /clusters/{nome}` — questo endpoint SÌ lo restituisce).
+`clusterType == "EXPERIENCE_CLUSTER"` identifica Data Services, contro
+`BASE_CLUSTER` per il cluster CDP principale. Implementato in
+`checks/cloudera.py::ClouderaClusterInfoCheck`.
+
+### HttpFS vs NameNode WebUI — porte diverse, non intercambiabili
+Su cluster CDP senza load balancer HttpFS dedicato: HttpFS gira sulla porta 14000
+(REST per operazioni file, `?op=...`) ma NON serve `/jmx`. Le query JMX (capacità
+cluster, stato DataNode — usate da `HdfsSpaceCheck`/`HdfsDataNodeCheck`/
+`HdfsWritabilityCheck` via `webhdfs.namenode_urls`) devono puntare alla **NameNode
+WebUI**, porta 9871 con Auto-TLS (9870 senza TLS) — `webhdfs.url` (HttpFS) e
+`webhdfs.namenode_urls` (NameNode WebUI) sono config concettualmente diverse anche
+se sembrano ridondanti. **Pericoloso**: puntare `namenode_urls` alla porta HttpFS
+non dà errore esplicito — restituisce `CapacityTotal=0`/"0 live DataNodes" (falso
+negativo silenzioso), non un errore di connessione.
+
 ---
 
 ## ✅ Testing Strategy
