@@ -112,10 +112,14 @@ class MonitoringCheckPickerScreen(Screen):
         elif key == curses.KEY_DOWN and self.cursor < len(self.categories) - 1:
             self.cursor += 1
         elif key == ord(" "):
-            if self.cursor in self.selected:
+            if self.cursor == 0:
+                # "all" e' mutuamente esclusivo con le categorie specifiche.
+                self.selected = set() if 0 in self.selected else set([0])
+            elif self.cursor in self.selected:
                 self.selected.discard(self.cursor)
             else:
                 self.selected.add(self.cursor)
+                self.selected.discard(0)  # una categoria specifica esclude "all"
         elif key in (ord("a"), ord("A")):
             if len(self.selected) == len(self.categories):
                 self.selected.clear()

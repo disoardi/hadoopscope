@@ -19,6 +19,8 @@ test_files = [
     os.path.join(TESTS_DIR, "test_ansible_runner.py"),
     os.path.join(TESTS_DIR, "test_state_store.py"),
     os.path.join(TESTS_DIR, "test_tui_screens_base.py"),
+    os.path.join(TESTS_DIR, "test_polling.py"),
+    os.path.join(TESTS_DIR, "test_tui_monitoring.py"),
 ]
 
 total_failed = 0

@@ -24,6 +24,14 @@ class Screen(object):
         ricaricare dati (es. rileggere state_store)."""
         pass
 
+    def on_idle_tick(self):
+        # type: () -> None
+        """Chiamato dal main loop quando getch() va in timeout (nessun
+        tasto premuto entro l'intervallo di redraw). Default no-op —
+        usato dalle schermate che vogliono un refresh periodico senza
+        richiedere input (es. HomeGridScreen col polling YARN)."""
+        pass
+
     def render(self, stdscr):
         # type: (object) -> None
         raise NotImplementedError(

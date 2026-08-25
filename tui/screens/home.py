@@ -4,15 +4,34 @@ drill-down di dettaglio su un singolo env."""
 from __future__ import print_function
 
 import curses
+import datetime
+import time
 
 import state_store
 from tui.screens.base import Screen
 from tui.widgets import safe_addstr, draw_box, C_OK, C_WARN, C_CRIT, C_DIM
 
+_STALE_AFTER_HOURS = 24
+
+# Il polling YARN in background (tui/polling.py) scrive in state_store ogni
+# 30s — qui si rilegge ogni 5s mentre si resta fermi sul tab Home, non ad
+# ogni tick di redraw (1s) per non martellare sqlite inutilmente.
+_IDLE_REFRESH_SECONDS = 5
+
 _STATUS_COLOR = {
     "OK": C_OK, "WARNING": C_WARN, "CRITICAL": C_CRIT,
     "UNKNOWN": C_DIM, "SKIPPED": C_DIM,
 }
+
+
+def _age_hours(run_at_iso):
+    # type: (str) -> object
+    """Ore trascorse da run_at_iso (isoformat) a ora. None se non parsabile."""
+    try:
+        run_at = datetime.datetime.strptime(run_at_iso.split(".")[0], "%Y-%m-%dT%H:%M:%S")
+    except (ValueError, AttributeError):
+        return None
+    return (datetime.datetime.now() - run_at).total_seconds() / 3600.0
 
 
 class HomeGridScreen(Screen):
@@ -22,9 +41,16 @@ class HomeGridScreen(Screen):
         Screen.__init__(self, app)
         self.cursor = 0
         self.envs = []  # type: list
+        self._last_refresh = 0.0
+
+    def on_idle_tick(self):
+        # type: () -> None
+        if time.time() - self._last_refresh >= _IDLE_REFRESH_SECONDS:
+            self.enter()
 
     def enter(self):
         # type: () -> None
+        self._last_refresh = time.time()
         configured = sorted(self.app.envs.keys())
         summary_by_env = {row["env"]: row for row in state_store.get_all_envs_summary()}
         self.envs = []
@@ -42,6 +68,7 @@ class HomeGridScreen(Screen):
                 "counts": row["counts"] if row else {},
                 "hdfs": hdfs["details"] if hdfs else None,
                 "yarn": yarn["details"] if yarn else None,
+                "stale_hours": _age_hours(row["oldest_run_at"]) if row else None,
             })
         if self.cursor >= len(self.envs):
             self.cursor = max(0, len(self.envs) - 1)
@@ -50,7 +77,7 @@ class HomeGridScreen(Screen):
         # type: (object) -> None
         safe_addstr(stdscr, 0, 20, "HOME — {} environment(s) configurati".format(len(self.envs)),
                    curses.A_BOLD)
-        col_w, row_h = 26, 8
+        col_w, row_h = 26, 9
         for i, entry in enumerate(self.envs):
             col = i % 3
             row = i // 3
@@ -76,6 +103,11 @@ class HomeGridScreen(Screen):
                                "YARN: {} run / {} pend".format(
                                    entry["yarn"].get("appsRunning", 0),
                                    entry["yarn"].get("appsPending", 0))[:col_w - 4])
+                    line_y += 1
+                if entry["stale_hours"] is not None and entry["stale_hours"] >= _STALE_AFTER_HOURS:
+                    safe_addstr(stdscr, line_y, x + 2,
+                               "⚠ dati vecchi {}h, rilancia".format(int(entry["stale_hours"]))[:col_w - 4],
+                               curses.color_pair(C_WARN))
         safe_addstr(stdscr, 2 + ((len(self.envs) // 3) + 1) * row_h + 1, 20,
                    "↑↓←→ naviga · Invio dettaglio · Tab cambia sezione", curses.color_pair(C_DIM))
 
@@ -97,17 +129,28 @@ class HomeGridScreen(Screen):
         return None
 
 
+_ROW_H = 3  # righe per singolo check (status + messaggio + spaziatura)
+
+
 class HomeDetailScreen(Screen):
-    """Drill-down su un singolo env — tutte le righe check_state."""
+    """Drill-down su un singolo env — tutte le righe check_state, scrollabile."""
 
     def __init__(self, app, env_name):
         Screen.__init__(self, app)
         self.env_name = env_name
-        self.rows = []  # type: list
+        self.rows = []    # type: list
+        self.scroll = 0
 
     def enter(self):
         # type: () -> None
         self.rows = state_store.get_env_summary(self.env_name)
+        self.scroll = 0
+
+    def _visible_count(self, stdscr):
+        # type: (object) -> int
+        max_y, _ = stdscr.getmaxyx()
+        available = max_y - 5  # titolo (0) + margine + footer + bordo frame
+        return max(1, available // _ROW_H)
 
     def render(self, stdscr):
         # type: (object) -> None
@@ -115,14 +158,29 @@ class HomeDetailScreen(Screen):
         if not self.rows:
             safe_addstr(stdscr, 2, 20, "Nessun check eseguito per questo environment.")
             return
+        visible = self._visible_count(stdscr)
         y = 2
-        for row in self.rows:
+        for row in self.rows[self.scroll:self.scroll + visible]:
             attr = curses.color_pair(_STATUS_COLOR.get(row["status"], C_DIM))
             safe_addstr(stdscr, y, 20, "[{}] {}".format(row["status"], row["check_name"]), attr | curses.A_BOLD)
             safe_addstr(stdscr, y + 1, 22, row["message"].splitlines()[0][:70], curses.color_pair(C_DIM))
-            y += 3
-        safe_addstr(stdscr, y, 20, "ESC torna alla grid", curses.color_pair(C_DIM))
+            y += _ROW_H
+        footer = "↑↓ scorri · ESC torna alla grid"
+        if len(self.rows) > visible:
+            footer += "  ({}-{}/{})".format(
+                self.scroll + 1, min(self.scroll + visible, len(self.rows)), len(self.rows))
+        safe_addstr(stdscr, y, 20, footer, curses.color_pair(C_DIM))
 
     def handle_input(self, key):
         # type: (int) -> object
+        visible = self._visible_count(self.app.stdscr)
+        max_scroll = max(0, len(self.rows) - visible)
+        if key == curses.KEY_UP and self.scroll > 0:
+            self.scroll -= 1
+        elif key == curses.KEY_DOWN and self.scroll < max_scroll:
+            self.scroll += 1
+        elif key == curses.KEY_NPAGE:  # Page Down
+            self.scroll = min(max_scroll, self.scroll + visible)
+        elif key == curses.KEY_PPAGE:  # Page Up
+            self.scroll = max(0, self.scroll - visible)
         return None  # ESC gestito centralmente da App (pop dello stack)

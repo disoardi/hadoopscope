@@ -15,6 +15,11 @@ def test_screen_default_enter_is_noop():
     s.enter()  # non deve sollevare
 
 
+def test_screen_default_on_idle_tick_is_noop():
+    s = Screen(app=None)
+    s.on_idle_tick()  # non deve sollevare
+
+
 def test_screen_render_raises_not_implemented():
     s = Screen(app=None)
     try:
@@ -36,6 +41,7 @@ def test_screen_handle_input_raises_not_implemented():
 if __name__ == "__main__":
     tests = [
         test_screen_default_enter_is_noop,
+        test_screen_default_on_idle_tick_is_noop,
         test_screen_render_raises_not_implemented,
         test_screen_handle_input_raises_not_implemented,
     ]

@@ -20,7 +20,8 @@ import glob
 from config import load_config
 from bootstrap import discover_capabilities, ensure_ansible
 import state_store
-from tui.widgets import init_colors, draw_sidebar, draw_frame, confirm
+import tui.polling as polling
+from tui.widgets import init_colors, draw_sidebar, draw_frame, confirm, REDRAW_TIMEOUT_MS
 from tui.screens.home import HomeGridScreen
 from tui.screens.monitoring import MonitoringMenuScreen
 from tui.screens.ops import OpsToolListScreen
@@ -81,6 +82,7 @@ class App(object):
         ]
         for stack in self.stacks:
             stack[0].enter()
+        polling.start(self)
 
     def current_stack(self):
         # type: () -> list
@@ -92,6 +94,10 @@ class App(object):
 
     def run(self):
         # type: () -> None
+        # Non-bloccante: getch() torna -1 se nessun tasto entro l'intervallo,
+        # cosi' il polling YARN in background puo' aggiornare la card Home
+        # senza attendere un input dell'utente (vedi tui/polling.py).
+        self.stdscr.timeout(REDRAW_TIMEOUT_MS)
         while True:
             self.stdscr.erase()
             draw_frame(self.stdscr, title="HADOOPSCOPE")
@@ -101,8 +107,22 @@ class App(object):
 
             key = self.stdscr.getch()
 
-            if key == ord("\t"):
-                self.active_tab = (self.active_tab + 1) % len(TABS)
+            if key == -1:
+                self.current_screen().on_idle_tick()
+                continue
+
+            if key == ord("\t") or key == curses.KEY_BTAB:
+                # Lasciando una sezione, la si riporta alla schermata radice
+                # (scarta lo stack di navigazione) — rientrarci più tardi
+                # deve sempre ripartire da capo, mai restare bloccati sulla
+                # schermata finale di un flusso precedente (es. risultato
+                # dell'ultimo run in Monitoring). enter() sulla radice della
+                # sezione di arrivo ne ricarica anche i dati (es. Home legge
+                # di nuovo state_store, mostrando lo stato aggiornato).
+                del self.current_stack()[1:]
+                step = 1 if key == ord("\t") else -1
+                self.active_tab = (self.active_tab + step) % len(TABS)
+                self.current_screen().enter()
                 continue
 
             if key == 27:  # ESC

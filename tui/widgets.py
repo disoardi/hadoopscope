@@ -21,6 +21,10 @@ C_BORDER       = 8
 C_DIM          = 9
 C_TAB_HOME_OFF = 10
 
+# Timeout di getch() nel main loop, per un redraw periodico (polling YARN
+# in background) anche senza input utente — vedi tui/app.py e tui/polling.py.
+REDRAW_TIMEOUT_MS = 1000
+
 
 def init_colors():
     # type: () -> None
@@ -145,9 +149,16 @@ def draw_kv_table(win, rows, y, x, w):
 
 def ask_text(stdscr, prompt, default=""):
     # type: (object, str, str) -> object
-    """Prompt testuale a riga singola. ESC annulla (ritorna None)."""
+    """Prompt testuale a riga singola. ESC annulla (ritorna None).
+
+    Il main loop imposta stdscr.timeout(REDRAW_TIMEOUT_MS) per il polling
+    in background — getstr() erediterebbe quel timeout troncando l'input
+    se l'utente si ferma a pensare più di un secondo. Va disattivato
+    (bloccante) per la durata del prompt e ripristinato dopo.
+    """
     curses.echo()
     curses.curs_set(1)
+    stdscr.timeout(-1)
     max_y, max_x = stdscr.getmaxyx()
     y = max_y - 2
     safe_addstr(stdscr, y, 2, " " * (max_x - 4))
@@ -161,16 +172,26 @@ def ask_text(stdscr, prompt, default=""):
     finally:
         curses.noecho()
         curses.curs_set(0)
+        stdscr.timeout(REDRAW_TIMEOUT_MS)
     return text if text else (default or None)
 
 
 def confirm(stdscr, question):
     # type: (object, str) -> bool
-    """Dialogo si'/no. Invio o 's'/'S' -> True, qualunque altro tasto -> False."""
+    """Dialogo si'/no. Invio o 's'/'S' -> True, qualunque altro tasto -> False.
+
+    Stesso motivo di ask_text: getch() va reso bloccante per la durata
+    del prompt, altrimenti un timeout scaduto senza input verrebbe letto
+    come "No" invece di aspettare la risposta dell'utente.
+    """
     max_y, max_x = stdscr.getmaxyx()
     y = max_y - 2
     safe_addstr(stdscr, y, 2, " " * (max_x - 4))
     safe_addstr(stdscr, y, 2, "{} [s/N]".format(question), curses.A_BOLD)
     stdscr.refresh()
-    key = stdscr.getch()
+    stdscr.timeout(-1)
+    try:
+        key = stdscr.getch()
+    finally:
+        stdscr.timeout(REDRAW_TIMEOUT_MS)
     return key in (ord("s"), ord("S"), curses.KEY_ENTER, 10, 13)
