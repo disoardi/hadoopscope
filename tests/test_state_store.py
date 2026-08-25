@@ -105,6 +105,19 @@ def test_details_roundtrip_as_dict():
         _reset()
 
 
+def test_get_all_envs_summary_includes_oldest_run_at():
+    tmpdir = tempfile.mkdtemp()
+    try:
+        state_store.init(os.path.join(tmpdir, "state.db"))
+        state_store.save_result("prod-hdp", _make_result("A", CheckResult.OK, "ok"))
+        state_store.save_result("prod-hdp", _make_result("B", CheckResult.OK, "ok"))
+        summary = {row["env"]: row for row in state_store.get_all_envs_summary()}
+        assert summary["prod-hdp"]["oldest_run_at"] is not None
+    finally:
+        shutil.rmtree(tmpdir)
+        _reset()
+
+
 def test_init_creates_parent_dir_if_missing():
     tmpdir = tempfile.mkdtemp()
     try:
@@ -123,6 +136,7 @@ if __name__ == "__main__":
         test_get_env_summary_empty_env_returns_empty_list,
         test_get_all_envs_summary_aggregates_worst_status_and_counts,
         test_get_all_envs_summary_empty_db_returns_empty_list,
+        test_get_all_envs_summary_includes_oldest_run_at,
         test_details_roundtrip_as_dict,
         test_init_creates_parent_dir_if_missing,
     ]

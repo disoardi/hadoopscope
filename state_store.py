@@ -91,10 +91,14 @@ def get_all_envs_summary():
     """Per env: stato peggiore, conteggi per status — per la grid Home."""
     conn = _connect()
     try:
-        cur = conn.execute("SELECT env, status FROM check_state ORDER BY env")
-        by_env = {}  # type: dict
+        cur = conn.execute("SELECT env, status, run_at FROM check_state ORDER BY env")
+        by_env = {}       # type: dict
+        oldest_by_env = {}  # type: dict
         for row in cur.fetchall():
             by_env.setdefault(row["env"], []).append(row["status"])
+            prev = oldest_by_env.get(row["env"])
+            if prev is None or row["run_at"] < prev:
+                oldest_by_env[row["env"]] = row["run_at"]
     finally:
         conn.close()
 
@@ -104,7 +108,12 @@ def get_all_envs_summary():
         for s in statuses:
             counts[s] = counts.get(s, 0) + 1
         worst = max(statuses, key=lambda s: _SEVERITY.get(s, 0))
-        summary.append({"env": env, "worst_status": worst, "counts": counts})
+        summary.append({
+            "env": env, "worst_status": worst, "counts": counts,
+            # Il più vecchio run_at tra i check dell'env — usato dalla TUI
+            # per segnalare "dati non aggiornati da >24h, rilancia i check".
+            "oldest_run_at": oldest_by_env[env],
+        })
     return summary
 
 
