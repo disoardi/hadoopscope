@@ -261,7 +261,11 @@ def _run_ansible_curl(config, shell_script, tag="WebHDFS", timeout=60):
         "  gather_facts: false\n"
         "  tasks:\n"
         "    - name: run\n"
-        "      shell: |\n"
+        # raw, non shell: ansible-core recente richiede Python >= 3.8 sul
+        # target per i moduli standard (AnsiballZ) — edge node con Python
+        # 3.6 fallisce con "Module result deserialization failed". raw
+        # esegue via SSH senza AnsiballZ, zero dipendenza da Python remoto.
+        "      raw: |\n"
         "{}\n"
         "      register: r\n"
         "    - debug: var=r.stdout\n"
@@ -319,7 +323,10 @@ def _run_ansible_curl(config, shell_script, tag="WebHDFS", timeout=60):
         m = re.search(r'"r\.stdout":\s*"((?:[^"\\]|\\.)*)"', out)
         if m:
             raw = m.group(1)
-            return raw.replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\")
+            # \r non gestito lasciava un backslash-r letterale prima del \n reale,
+            # rompendo json.loads a inizio stringa ("Expecting property name...").
+            return raw.replace("\\r\\n", "\n").replace("\\n", "\n") \
+                      .replace('\\"', '"').replace("\\\\", "\\")
         # Caso 2: r.stdout è un oggetto/array JSON (Ansible lo ha auto-parsato quando
         # il comando ha emesso JSON valido).  Riconverti a stringa perché i caller
         # usano json.loads(stdout).
@@ -764,7 +771,13 @@ class HdfsWritabilityCheck(CheckBase):
         test_path   = self.config.get("checks", {}).get(
             "hdfs_writability", {}).get("test_path", "/tmp/.hadoopscope-probe")
 
-        if not base_url:
+        # HA: la scrittura va accettata solo dal NameNode ACTIVE (lo standby
+        # risponde StandbyException, non un redirect) — riusa namenode_urls
+        # (stessa chiave di HdfsSpace/HdfsDataNodes) per riprovare sull'altro
+        # host se il primo è standby, invece di fallire in modo permanente.
+        namenode_urls = hdfs_cfg.get("namenode_urls") or ([base_url] if base_url else [])
+
+        if not namenode_urls:
             return CheckResult(
                 name="HdfsWritability",
                 status=CheckResult.UNKNOWN,
@@ -775,8 +788,8 @@ class HdfsWritabilityCheck(CheckBase):
         use_krb, keytab, principal = _get_kerberos_cfg(self.config)
         ansi_krb, ansi_keytab, ansi_principal = _get_ansible_kerberos_cfg(self.config)
 
-        _debug.log("HdfsWritability", "insecure={} via_ansible={} use_krb={} timeout={}".format(
-            insecure, via_ansible, use_krb, timeout))
+        _debug.log("HdfsWritability", "insecure={} via_ansible={} use_krb={} timeout={} namenode_urls={}".format(
+            insecure, via_ansible, use_krb, timeout, namenode_urls))
 
         if not via_ansible and use_krb:
             try:
@@ -788,80 +801,97 @@ class HdfsWritabilityCheck(CheckBase):
                     message="Kerberos init failed: {}".format(str(e))
                 )
 
-        try:
-            import time
-            test_path_ts = "{}-{}".format(test_path, int(time.time()))
+        import time
+        test_path_ts = "{}-{}".format(test_path, int(time.time()))
+        nn_errors = []
 
-            if via_ansible:
-                kinit_line    = "kinit -kt {} {}\n".format(ansi_keytab, ansi_principal) \
-                    if (ansi_krb and ansi_keytab and ansi_principal) else ""
-                insecure_flag = "--insecure" if insecure else ""
-                create_url = "{}/webhdfs/v1{}?op=CREATE&overwrite=true".format(
-                    base_url.rstrip("/"), test_path_ts)
-                delete_url = "{}/webhdfs/v1{}?op=DELETE".format(
-                    base_url.rstrip("/"), test_path_ts)
-                script = (
-                    "set -e\n"
-                    "{kinit}"
-                    "PUT_HTTP=$(curl -s {ins} --negotiate -u : "
-                    "-X PUT -L --location-trusted "
-                    "-H 'Content-Type: application/octet-stream' "
-                    "--data-binary 'hadoopscope-probe' "
-                    "-w '%{{http_code}}' -o /dev/null '{create}')\n"
-                    "echo \"WebHDFS CREATE HTTP:$PUT_HTTP\"\n"
-                    "[ \"$PUT_HTTP\" -ge 200 ] && [ \"$PUT_HTTP\" -lt 300 ]\n"
-                    "DEL_HTTP=$(curl -s {ins} --negotiate -u : "
-                    "-X DELETE -w '%{{http_code}}' -o /dev/null '{delete}')\n"
-                    "echo \"WebHDFS DELETE HTTP:$DEL_HTTP\"\n"
-                    "[ \"$DEL_HTTP\" -ge 200 ] && [ \"$DEL_HTTP\" -lt 300 ]"
-                ).format(kinit=kinit_line, ins=insecure_flag,
-                         create=create_url, delete=delete_url)
-                _run_ansible_curl(self.config, script, tag="HdfsWritability",
-                                  timeout=timeout)
-
-            elif use_krb:
-                _curl_put_webhdfs(base_url, test_path_ts, self.TEST_FILE_CONTENT,
-                                  timeout=timeout, no_proxy=no_proxy, insecure=insecure)
-                _curl_delete_webhdfs(base_url, test_path_ts, timeout=timeout,
-                                     no_proxy=no_proxy, insecure=insecure)
-            else:
-                # Simple auth: urllib + gestione redirect 307
-                # WebHDFS CREATE richiede HTTP PUT (non POST) — serve get_method override
-                create_url = "{}/webhdfs/v1{}?op=CREATE&overwrite=true&user.name={}".format(
-                    base_url.rstrip("/"), test_path_ts, user
+        for nn_url in namenode_urls:
+            base_url = nn_url.rstrip("/")
+            try:
+                self._write_and_delete(
+                    base_url, test_path_ts, user, no_proxy, insecure, via_ansible,
+                    use_krb, timeout, ansi_krb, ansi_keytab, ansi_principal)
+                return CheckResult(
+                    name="HdfsWritability",
+                    status=CheckResult.OK,
+                    message="HDFS write/delete test passed"
                 )
-                try:
-                    # Step 1: PUT a NameNode (no body) → 307 redirect verso DataNode
-                    _open_url(_make_request(create_url, "PUT", data=b""),
-                              timeout=DEFAULT_TIMEOUT, no_proxy=no_proxy)
-                except HTTPError as e:
-                    if e.code == 307:
-                        location = e.headers.get("Location", "")
-                        if location:
-                            # Step 2: PUT a DataNode con il contenuto del file
-                            _open_url(_make_request(location, "PUT",
-                                                    data=self.TEST_FILE_CONTENT),
-                                      timeout=DEFAULT_TIMEOUT, no_proxy=no_proxy)
-                        else:
-                            raise
+            except Exception as e:
+                nn_errors.append("{}: {}".format(base_url, str(e)))
+
+        return CheckResult(
+            name="HdfsWritability",
+            status=CheckResult.CRITICAL,
+            message="HDFS write test failed (tried {} NN): {}".format(
+                len(namenode_urls), "; ".join(nn_errors))
+        )
+
+    def _write_and_delete(self, base_url, test_path_ts, user, no_proxy, insecure,
+                          via_ansible, use_krb, timeout, ansi_krb, ansi_keytab,
+                          ansi_principal):
+        # type: (str, str, str, bool, bool, bool, bool, int, bool, str, str) -> None
+        """Un tentativo di scrittura+cancellazione contro un singolo NameNode.
+
+        Solleva un'eccezione se fallisce — il chiamante (run()) decide se
+        riprovare su un altro NN (HA) o arrendersi.
+        """
+        if via_ansible:
+            kinit_line    = "kinit -kt {} {}\n".format(ansi_keytab, ansi_principal) \
+                if (ansi_krb and ansi_keytab and ansi_principal) else ""
+            insecure_flag = "--insecure" if insecure else ""
+            create_url = "{}/webhdfs/v1{}?op=CREATE&overwrite=true".format(
+                base_url, test_path_ts)
+            delete_url = "{}/webhdfs/v1{}?op=DELETE".format(
+                base_url, test_path_ts)
+            script = (
+                "set -e\n"
+                "{kinit}"
+                "PUT_HTTP=$(curl -s {ins} --negotiate -u : "
+                "-X PUT -L --location-trusted "
+                "-H 'Content-Type: application/octet-stream' "
+                "--data-binary 'hadoopscope-probe' "
+                "-w '%{{http_code}}' -o /dev/null '{create}')\n"
+                "echo \"WebHDFS CREATE HTTP:$PUT_HTTP\"\n"
+                "[ \"$PUT_HTTP\" -ge 200 ] && [ \"$PUT_HTTP\" -lt 300 ]\n"
+                "DEL_HTTP=$(curl -s {ins} --negotiate -u : "
+                "-X DELETE -w '%{{http_code}}' -o /dev/null '{delete}')\n"
+                "echo \"WebHDFS DELETE HTTP:$DEL_HTTP\"\n"
+                "[ \"$DEL_HTTP\" -ge 200 ] && [ \"$DEL_HTTP\" -lt 300 ]"
+            ).format(kinit=kinit_line, ins=insecure_flag,
+                     create=create_url, delete=delete_url)
+            _run_ansible_curl(self.config, script, tag="HdfsWritability",
+                              timeout=timeout)
+
+        elif use_krb:
+            _curl_put_webhdfs(base_url, test_path_ts, self.TEST_FILE_CONTENT,
+                              timeout=timeout, no_proxy=no_proxy, insecure=insecure)
+            _curl_delete_webhdfs(base_url, test_path_ts, timeout=timeout,
+                                 no_proxy=no_proxy, insecure=insecure)
+        else:
+            # Simple auth: urllib + gestione redirect 307
+            # WebHDFS CREATE richiede HTTP PUT (non POST) — serve get_method override
+            create_url = "{}/webhdfs/v1{}?op=CREATE&overwrite=true&user.name={}".format(
+                base_url, test_path_ts, user
+            )
+            try:
+                # Step 1: PUT a NameNode (no body) → 307 redirect verso DataNode
+                _open_url(_make_request(create_url, "PUT", data=b""),
+                          timeout=DEFAULT_TIMEOUT, no_proxy=no_proxy)
+            except HTTPError as e:
+                if e.code == 307:
+                    location = e.headers.get("Location", "")
+                    if location:
+                        # Step 2: PUT a DataNode con il contenuto del file
+                        _open_url(_make_request(location, "PUT",
+                                                data=self.TEST_FILE_CONTENT),
+                                  timeout=DEFAULT_TIMEOUT, no_proxy=no_proxy)
                     else:
                         raise
-                # WebHDFS DELETE richiede HTTP DELETE (non GET)
-                del_url = "{}/webhdfs/v1{}?op=DELETE&user.name={}".format(
-                    base_url.rstrip("/"), test_path_ts, user
-                )
-                _open_url(_make_request(del_url, "DELETE"),
-                          timeout=DEFAULT_TIMEOUT, no_proxy=no_proxy)
-
-            return CheckResult(
-                name="HdfsWritability",
-                status=CheckResult.OK,
-                message="HDFS write/delete test passed"
+                else:
+                    raise
+            # WebHDFS DELETE richiede HTTP DELETE (non GET)
+            del_url = "{}/webhdfs/v1{}?op=DELETE&user.name={}".format(
+                base_url, test_path_ts, user
             )
-
-        except Exception as e:
-            return CheckResult(
-                name="HdfsWritability",
-                status=CheckResult.CRITICAL,
-                message="HDFS write test failed: {}".format(str(e))
-            )
+            _open_url(_make_request(del_url, "DELETE"),
+                      timeout=DEFAULT_TIMEOUT, no_proxy=no_proxy)

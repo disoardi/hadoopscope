@@ -560,39 +560,48 @@ class HiveCheck(CheckBase):
                                sql_content, conn_str,
                                tag="HiveCheck", kinit_cmd=None, timeout=60):
         # type: (str, str, str, str, str, object, int) -> tuple
-        """Run beeline -f <sql_file> con il SQL copiato sull'edge node via Ansible copy.
+        """Run beeline -f <sql_file> con il SQL scritto sull'edge node via heredoc.
 
-        Evita [Errno 7] Argument list too long: il contenuto SQL viene trasferito
-        tramite il modulo Ansible copy (nessun limite di dimensione), e il blocco
-        shell: contiene solo il breve comando beeline -f.
+        Un unico task 'raw' (kinit + heredoc + beeline -f + cleanup): nessun modulo
+        Ansible standard (copy/shell/file) coinvolto — quei moduli passano da
+        AnsiballZ, che richiede Python >= 3.8 sul target, e su edge node con
+        Python 3.6 falliscono con "Failed to get information on remote file" /
+        "Shared connection ... closed" (stesso limite già noto per shell/command,
+        vedi ansible_runner.py). 'raw' esegue via SSH senza AnsiballZ.
 
-        sql_content: contenuto del file SQL (arbitrariamente grande)
+        # ponytail: heredoc via raw torna soggetto al limite ARG_MAX della riga
+        # di comando SSH (~128KB) per SQL molto grandi (era il motivo per cui si
+        # era passati a 'copy' — vedi CLAUDE.md Known Gotchas). Se un cluster con
+        # centinaia di tabelle/db rompe di nuovo per Argument list too long,
+        # serve un trasferimento file che non passi da moduli standard (es. sftp
+        # diretto in Python, bypassando ansible per questo step).
+
+        sql_content: contenuto del file SQL
         conn_str: stringa di connessione beeline (beeline -u ... auth opts)
 
         Returns (rc, stdout, stderr) — stesso formato di _run_playbook.
         """
         import random
-        remote_sql = "/tmp/hs_{}.sql".format(random.randint(100000, 999999))
+        suffix = random.randint(100000, 999999)
+        remote_sql = "/tmp/hs_{}.sql".format(suffix)
+        heredoc_marker = "HS_SQL_EOF_{}".format(suffix)
 
         # Debug: logga il SQL localmente (non serve cat >&2 nel playbook)
         _debug.section(tag, "SQL file content ({} lines)".format(
             len(sql_content.splitlines())))
         _debug.log(tag, sql_content, multiline=True)
 
-        # Shell block breve: solo kinit (opzionale) + beeline -f
         script_parts = []
         if kinit_cmd:
             script_parts.append(kinit_cmd)
+        script_parts.append("cat > {} << '{}'".format(remote_sql, heredoc_marker))
+        script_parts.extend(sql_content.splitlines())
+        script_parts.append(heredoc_marker)
         script_parts.append(
             conn_str + " --force -f " + remote_sql + " 2>/dev/null || true"
         )
+        script_parts.append("rm -f " + remote_sql)
         shell_lines = "\n".join("        " + l for l in script_parts)
-
-        # Indenta SQL per YAML block scalar (copy.content: |)
-        # content: è a 8 spazi → content lines a 10 spazi (YAML strip 10)
-        sql_indented = "\n".join("          " + l for l in sql_content.splitlines())
-        if sql_indented:
-            sql_indented += "\n"
 
         playbook = (
             "---\n"
@@ -600,24 +609,13 @@ class HiveCheck(CheckBase):
             "  hosts: all\n"
             "  gather_facts: false\n"
             "  tasks:\n"
-            "    - name: Copy SQL file\n"
-            "      copy:\n"
-            "        content: |\n"
-            "{sql_indented}"
-            "        dest: {remote_sql}\n"
             "    - name: Beeline test\n"
-            "      shell: |\n"
+            "      raw: |\n"
             "{shell_lines}\n"
             "      register: r\n"
-            "    - name: Cleanup SQL file\n"
-            "      file:\n"
-            "        path: {remote_sql}\n"
-            "        state: absent\n"
             "    - debug: var=r.stdout\n"
             "    - debug: var=r.stderr\n"
         ).format(
-            sql_indented=sql_indented,
-            remote_sql=remote_sql,
             shell_lines=shell_lines,
         )
 
