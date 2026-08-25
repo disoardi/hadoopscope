@@ -74,3 +74,25 @@ echo "Exit: $?"
     --output json \
     > /var/log/hadoopscope/latest.json 2>&1
 ```
+
+## `ops` subcommand
+
+On-demand YARN application tools — separate from the monitoring/alerting
+flow above, for investigating a specific job without a Hadoop client.
+
+```
+hadoopscope.py ops [--config PATH] [--output {text,json}] [--debug]
+                   {app-status,app-logs} --env ENV --app-id APP_ID
+```
+
+| Tool | Description |
+|------|-------------|
+| `app-status` | Status/metrics for a YARN application (running, finished, failed) |
+| `app-logs` | Downloads aggregated logs for a terminated application — requires `ansible.edge_host` configured for the environment (kinit + `yarn logs` run on the edge node); files land in `download_dir` (default `~/.hadoopscope/downloads`) |
+
+```bash
+python3 hadoopscope.py ops app-status --env prod-cdp --app-id application_1699999999_0001
+python3 hadoopscope.py ops app-logs   --env prod-cdp --app-id application_1699999999_0001
+```
+
+Both tools are also available from the [TUI](tui.md), tab **Ops**.

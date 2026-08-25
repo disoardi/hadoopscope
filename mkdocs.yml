@@ -41,6 +41,7 @@ nav:
     - Hive: checks/hive.md
   - Alerts: alerts.md
   - CLI Reference: cli.md
+  - Interactive TUI: tui.md
   - Architecture: architecture.md
   - Development:
     - Testing: dev/testing.md

@@ -70,18 +70,51 @@ python3 hadoopscope.py --show-capabilities
 ## TUI interattiva
 
 ```bash
+# Un singolo config
 python3 -m tui.app config/hadoopscope.yaml
+
+# Una directory: carica tutti i *.yaml al suo interno come ambienti
+# separati (isolati per file — mai mescolare checks:/alerts: tra clienti)
+python3 -m tui.app config/local
 ```
 
 Navigazione 100% da tastiera, tre sezioni sempre accessibili dalla
-sidebar (`Tab` per cambiare sezione, `ESC` per tornare indietro/uscire):
+sidebar (`Tab`/`Shift+Tab` per cambiare sezione avanti/indietro, `ESC`
+per tornare indietro/uscire). Lasciando una sezione, il suo stack di
+navigazione torna alla schermata iniziale — rientrarci riparte sempre da
+capo, non resta mai bloccato sull'ultima schermata visitata:
 
-- **Home** — stato riassuntivo di tutti i cluster configurati, Invio su
-  una card per il dettaglio per servizio
+- **Home** — stato riassuntivo di tutti i cluster configurati (↑↓←→ per
+  navigare le card, Invio per il dettaglio per servizio, ↑↓/PgUp/PgDn per
+  scorrere il dettaglio). Un thread in background esegue il poll delle
+  metriche YARN (app running/pending) ogni 30s per ogni ambiente
+  configurato, così la dashboard resta aggiornata anche senza lanciare
+  check manualmente. Una card segnala `⚠ dati vecchi Nh, rilancia` se
+  nessun check gira da più di 24 ore
 - **Monitoring** — esegui check on-demand (con opzione di schedularli via
   crontab) o gestisci i check già schedulati
 - **Ops** — tool operativi on-demand (es. status/log di un'applicazione
-  YARN dato l'application id)
+  YARN dato l'application id) — stessi tool disponibili da CLI, vedi
+  sezione [Ops](#ops-azioni-on-demand) sotto
+
+## Ops (azioni on-demand)
+
+Oltre ai check di monitoraggio, il verbo `ops` espone azioni puntuali
+sulle applicazioni YARN — utile per investigare un job specifico senza
+un client Hadoop installato:
+
+```bash
+# Status/metriche di un'applicazione (running, finished, failed)
+python3 hadoopscope.py ops app-status --env prod-cdp --app-id application_1699999999_0001
+
+# Scarica i log aggregati di un'applicazione terminata (richiede edge node via Ansible)
+python3 hadoopscope.py ops app-logs --env prod-cdp --app-id application_1699999999_0001
+```
+
+Entrambi i tool sono disponibili anche dalla TUI, tab **Ops**. `app-logs`
+richiede `ansible.edge_host` configurato per l'environment (kinit +
+`yarn logs` eseguiti sull'edge node) — i file scaricati finiscono in
+`download_dir` (default `~/.hadoopscope/downloads`).
 
 ## Feature Matrix
 
@@ -92,12 +125,16 @@ sidebar (`Tab` per cambiare sezione, `ESC` per tornare indietro/uscire):
 | `ClusterAlertsCheck` | health | REST API | Active CRITICAL alerts from Ambari |
 | `ConfigStalenessCheck` | health | REST API | Stale configurations not yet deployed |
 | `ClouderaServiceHealthCheck` | health | REST API | All CDP service health via CM API |
-| `HdfsSpaceCheck` | hdfs | REST API | Space usage per configured path |
+| `ClouderaClusterInfoCheck` | health | REST API | CM/CDP version + Data Services (ECS) detection |
+| `ClouderaParcelCheck` | health | REST API | Non-activated parcels |
+| `HdfsSpaceCheck` | hdfs | REST API | Space usage per configured path (HA-aware via `namenode_urls`) |
 | `HdfsDataNodeCheck` | hdfs | REST API | Dead/stale DataNodes via JMX |
-| `HdfsWritabilityCheck` | hdfs | REST API | Write/delete test on HDFS |
+| `HdfsWritabilityCheck` | hdfs | REST API | Write/delete test on HDFS (retries all `namenode_urls` on `StandbyException`) |
 | `YarnNodeHealthCheck` | yarn | REST API | UNHEALTHY/LOST YARN nodes |
 | `YarnQueueCheck` | yarn | REST API | Queue capacity utilization |
+| `YarnClusterMetricsCheck` | yarn | REST API | Apps running/pending, memory allocated — informational, powers the Home dashboard and background polling |
 | `HiveCheck` | hive | ansible OR docker | Beeline test query via edge node |
+| `HivePartitionCheck` | hive | ansible OR docker | Table/partition counts per database via edge node |
 
 ## Configuration
 
