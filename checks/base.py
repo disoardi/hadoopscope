@@ -3,6 +3,22 @@
 from __future__ import print_function
 
 
+def check_requires(requires, caps):
+    # type: (list, dict) -> bool
+    """OR logico tra le require-list, AND logico dentro ogni lista.
+
+    requires = [["ansible"], ["docker"]]  →  ansible OR docker
+    requires = [["ansible", "kinit"]]      →  ansible AND kinit
+    requires = []                           →  sempre True
+    """
+    if not requires:
+        return True
+    for req_list in requires:
+        if all(caps.get(r, False) for r in req_list):
+            return True
+    return False
+
+
 class CheckResult(object):
     OK       = "OK"
     WARNING  = "WARNING"

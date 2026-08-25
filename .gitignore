@@ -1,6 +1,9 @@
 # Config con credenziali reali
-# Ignora TUTTI i file .yaml in config/ — includi esplicitamente solo quelli safe
+# Ignora TUTTI i file .yaml in config/ e nelle sue sottodirectory (es.
+# config/ISP/, config/local/ — raggruppamenti per cliente usati dalla TUI)
+# — includi esplicitamente solo quelli safe, che restano nella root
 config/*.yaml
+config/**/*.yaml
 !config/example.yaml
 !config/test.yaml
 !config/docker-test.yaml

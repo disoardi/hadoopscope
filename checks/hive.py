@@ -2,13 +2,12 @@
 
 from __future__ import print_function
 
-import json
 import os
-import re
 import subprocess
 import tempfile
 
 from checks.base import CheckBase, CheckResult
+import ansible_runner
 import debug as _debug
 
 
@@ -159,55 +158,11 @@ def _merge_ns_cfg(hive_cfg, ns_entry):
     return merged
 
 
-def _extract_task_error(ansible_stdout):
-    # type: (str) -> str
-    """Extract the actual task error from Ansible stdout.
-
-    Ansible wraps the task result as JSON after 'FAILED! => '.
-    We parse that JSON to get beeline's real stdout/stderr/msg
-    instead of returning the truncated Ansible header.
-    """
-    # Ansible stampa il task result come JSON su una sola riga.
-    # re.DOTALL NON va usato: cattura anche il PLAY RECAP che segue,
-    # rendendo il JSON non parsabile. Il \} assicura di fermarsi
-    # alla chiusura dell'oggetto sulla stessa riga.
-    match = re.search(r"FAILED! => (\{.*\})", ansible_stdout)
-    if not match:
-        return ansible_stdout[-800:]
-    try:
-        data = json.loads(match.group(1))
-        parts = []
-        if data.get("msg"):
-            parts.append("msg: {}".format(data["msg"]))
-        if data.get("stdout"):
-            parts.append("beeline stdout: {}".format(data["stdout"][:600]))
-        if data.get("stderr"):
-            parts.append("beeline stderr: {}".format(data["stderr"][:400]))
-        return "\n".join(parts) if parts else ansible_stdout[-800:]
-    except (ValueError, KeyError):
-        return ansible_stdout[-800:]
-
-
-def _extract_stdout(ansible_out):
-    # type: (str) -> str
-    """Extract shell stdout string from Ansible debug output (r.stdout)."""
-    m = re.search(r'"r\.stdout":\s*"((?:[^"\\]|\\.)*)"', ansible_out)
-    if m:
-        raw = m.group(1)
-        raw = raw.replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\")
-        return raw
-    return ""
-
-
-def _extract_stderr(ansible_out):
-    # type: (str) -> str
-    """Extract shell stderr string from Ansible debug output (r.stderr)."""
-    m = re.search(r'"r\.stderr":\s*"((?:[^"\\]|\\.)*)"', ansible_out)
-    if m:
-        raw = m.group(1)
-        raw = raw.replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\")
-        return raw
-    return ""
+# Alias — implementazione condivisa spostata in ansible_runner.py (usata anche
+# da _run_playbook_with_sql sotto e potenzialmente da altri check via Ansible).
+_extract_task_error = ansible_runner.extract_task_error
+_extract_stdout = ansible_runner.extract_stdout
+_extract_stderr = ansible_runner.extract_stderr
 
 
 def _parse_databases_output(output):
@@ -578,15 +533,7 @@ class HiveCheck(CheckBase):
 
     def _build_inventory(self, edge_host, ssh_user, ssh_key):
         # type: (str, str, str) -> str
-        if edge_host in ("localhost", "127.0.0.1", "::1"):
-            return "localhost ansible_connection=local"
-        return (
-            "{host} ansible_user={user} ansible_ssh_private_key_file={key}"
-        ).format(
-            host=edge_host,
-            user=ssh_user,
-            key=ssh_key or "~/.ssh/id_rsa"
-        )
+        return ansible_runner.build_inventory(edge_host, ssh_user, ssh_key)
 
     def _run_playbook(self, ansible_bin, inventory_content, beeline_cmd,
                       tag="HiveCheck", kinit_cmd=None, timeout=60):
@@ -605,125 +552,56 @@ class HiveCheck(CheckBase):
           rc == -1 : subprocess timeout
           rc == -2 : unexpected exception (err contains message)
         """
-        script_parts = []
-        if kinit_cmd:
-            script_parts.append(kinit_cmd)
-        for line in beeline_cmd.splitlines():
-            script_parts.append(line)
-        shell_lines = "\n".join("        " + l for l in script_parts)
-
-        playbook = (
-            "---\n"
-            "- name: HiveCheck\n"
-            "  hosts: all\n"
-            "  gather_facts: false\n"
-            "  tasks:\n"
-            "    - name: Beeline test\n"
-            "      shell: |\n"
-            "{shell_lines}\n"
-            "      register: r\n"
-            "    - debug: var=r.stdout\n"
-            "    - debug: var=r.stderr\n"
-        ).format(shell_lines=shell_lines)
-
-        inv_path = play_path = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode='w', suffix='.ini', delete=False, prefix='hs_inv_'
-            ) as f:
-                f.write(inventory_content)
-                inv_path = f.name
-
-            with tempfile.NamedTemporaryFile(
-                mode='w', suffix='.yml', delete=False, prefix='hs_hive_'
-            ) as f:
-                f.write(playbook)
-                play_path = f.name
-
-            _debug.log(tag, "playbook: {}".format(play_path), multiline=False)
-            _debug.section(tag, "playbook content")
-            _debug.log(tag, playbook, multiline=True)
-
-            env = os.environ.copy()
-            env["ANSIBLE_HOST_KEY_CHECKING"] = "False"
-
-            proc = subprocess.Popen(
-                [ansible_bin, "-i", inv_path, play_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=env
-            )
-            stdout, stderr = proc.communicate(timeout=timeout)
-            out = stdout.decode("utf-8", errors="replace")
-            err = stderr.decode("utf-8", errors="replace")
-            _debug.log(tag, "rc: {}".format(proc.returncode))
-            _debug.section(tag, "ansible stdout")
-            _debug.log(tag, out if out.strip() else "(empty)", multiline=True)
-            # Estrai e mostra r.stdout e r.stderr dal debug task Ansible
-            r_stdout = _extract_stdout(out)
-            r_stderr = _extract_stderr(out)
-            if r_stdout.strip():
-                _debug.section(tag, "r.stdout (beeline output)")
-                _debug.log(tag, r_stdout, multiline=True)
-            else:
-                _debug.log(tag, "r.stdout: (empty)")
-            if r_stderr.strip():
-                _debug.section(tag, "r.stderr (beeline stderr / SQL file)")
-                _debug.log(tag, r_stderr, multiline=True)
-            if err.strip():
-                _debug.section(tag, "ansible process stderr")
-                _debug.log(tag, err, multiline=True)
-            return (proc.returncode, out, err)
-
-        except subprocess.TimeoutExpired:
-            return -1, "", "timeout after {}s".format(timeout)
-        except Exception as e:
-            return -2, "", str(e)
-        finally:
-            for p in (inv_path, play_path):
-                if p and os.path.exists(p):
-                    try:
-                        os.unlink(p)
-                    except OSError:
-                        pass
+        return ansible_runner.run_playbook(
+            ansible_bin, inventory_content, beeline_cmd,
+            tag=tag, kinit_cmd=kinit_cmd, timeout=timeout)
 
     def _run_playbook_with_sql(self, ansible_bin, inventory_content,
                                sql_content, conn_str,
                                tag="HiveCheck", kinit_cmd=None, timeout=60):
         # type: (str, str, str, str, str, object, int) -> tuple
-        """Run beeline -f <sql_file> con il SQL copiato sull'edge node via Ansible copy.
+        """Run beeline -f <sql_file> con il SQL scritto sull'edge node via heredoc.
 
-        Evita [Errno 7] Argument list too long: il contenuto SQL viene trasferito
-        tramite il modulo Ansible copy (nessun limite di dimensione), e il blocco
-        shell: contiene solo il breve comando beeline -f.
+        Un unico task 'raw' (kinit + heredoc + beeline -f + cleanup): nessun modulo
+        Ansible standard (copy/shell/file) coinvolto — quei moduli passano da
+        AnsiballZ, che richiede Python >= 3.8 sul target, e su edge node con
+        Python 3.6 falliscono con "Failed to get information on remote file" /
+        "Shared connection ... closed" (stesso limite già noto per shell/command,
+        vedi ansible_runner.py). 'raw' esegue via SSH senza AnsiballZ.
 
-        sql_content: contenuto del file SQL (arbitrariamente grande)
+        # ponytail: heredoc via raw torna soggetto al limite ARG_MAX della riga
+        # di comando SSH (~128KB) per SQL molto grandi (era il motivo per cui si
+        # era passati a 'copy' — vedi CLAUDE.md Known Gotchas). Se un cluster con
+        # centinaia di tabelle/db rompe di nuovo per Argument list too long,
+        # serve un trasferimento file che non passi da moduli standard (es. sftp
+        # diretto in Python, bypassando ansible per questo step).
+
+        sql_content: contenuto del file SQL
         conn_str: stringa di connessione beeline (beeline -u ... auth opts)
 
         Returns (rc, stdout, stderr) — stesso formato di _run_playbook.
         """
         import random
-        remote_sql = "/tmp/hs_{}.sql".format(random.randint(100000, 999999))
+        suffix = random.randint(100000, 999999)
+        remote_sql = "/tmp/hs_{}.sql".format(suffix)
+        heredoc_marker = "HS_SQL_EOF_{}".format(suffix)
 
         # Debug: logga il SQL localmente (non serve cat >&2 nel playbook)
         _debug.section(tag, "SQL file content ({} lines)".format(
             len(sql_content.splitlines())))
         _debug.log(tag, sql_content, multiline=True)
 
-        # Shell block breve: solo kinit (opzionale) + beeline -f
         script_parts = []
         if kinit_cmd:
             script_parts.append(kinit_cmd)
+        script_parts.append("cat > {} << '{}'".format(remote_sql, heredoc_marker))
+        script_parts.extend(sql_content.splitlines())
+        script_parts.append(heredoc_marker)
         script_parts.append(
             conn_str + " --force -f " + remote_sql + " 2>/dev/null || true"
         )
+        script_parts.append("rm -f " + remote_sql)
         shell_lines = "\n".join("        " + l for l in script_parts)
-
-        # Indenta SQL per YAML block scalar (copy.content: |)
-        # content: è a 8 spazi → content lines a 10 spazi (YAML strip 10)
-        sql_indented = "\n".join("          " + l for l in sql_content.splitlines())
-        if sql_indented:
-            sql_indented += "\n"
 
         playbook = (
             "---\n"
@@ -731,24 +609,13 @@ class HiveCheck(CheckBase):
             "  hosts: all\n"
             "  gather_facts: false\n"
             "  tasks:\n"
-            "    - name: Copy SQL file\n"
-            "      copy:\n"
-            "        content: |\n"
-            "{sql_indented}"
-            "        dest: {remote_sql}\n"
             "    - name: Beeline test\n"
-            "      shell: |\n"
+            "      raw: |\n"
             "{shell_lines}\n"
             "      register: r\n"
-            "    - name: Cleanup SQL file\n"
-            "      file:\n"
-            "        path: {remote_sql}\n"
-            "        state: absent\n"
             "    - debug: var=r.stdout\n"
             "    - debug: var=r.stderr\n"
         ).format(
-            sql_indented=sql_indented,
-            remote_sql=remote_sql,
             shell_lines=shell_lines,
         )
 
@@ -813,16 +680,9 @@ class HiveCheck(CheckBase):
                         pass
 
     def _find_ansible(self):
-        # type: () -> str
+        # type: () -> object
         """Trova il binary ansible da caps o dal PATH."""
-        import shutil
-        bin_path = shutil.which("ansible-playbook")
-        if bin_path:
-            return bin_path
-        venv_bin = os.path.expanduser("~/.hadoopscope/venv/bin/ansible-playbook")
-        if os.path.exists(venv_bin):
-            return venv_bin
-        return None
+        return ansible_runner.find_ansible_bin()
 
 
 class HivePartitionCheck(HiveCheck):

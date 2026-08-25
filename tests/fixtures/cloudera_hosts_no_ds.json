@@ -1,0 +1,6 @@
+{
+  "items": [
+    {"hostId": "h1", "hostname": "cm01", "clusterRef": {"clusterName": "test-cluster"}},
+    {"hostId": "h2", "hostname": "cm02", "clusterRef": {"clusterName": "test-cluster"}}
+  ]
+}

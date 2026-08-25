@@ -1,0 +1,18 @@
+{
+  "clusterMetrics": {
+    "appsSubmitted": 42,
+    "appsCompleted": 38,
+    "appsPending": 2,
+    "appsRunning": 2,
+    "appsFailed": 0,
+    "appsKilled": 0,
+    "reservedMB": 0,
+    "availableMB": 4096,
+    "allocatedMB": 12288,
+    "totalMB": 16384,
+    "totalNodes": 4,
+    "activeNodes": 4,
+    "lostNodes": 0,
+    "unhealthyNodes": 0
+  }
+}

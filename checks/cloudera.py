@@ -4,9 +4,10 @@ from __future__ import print_function
 
 import json
 import socket
+import ssl
 
 try:
-    from urllib.request import urlopen, Request, build_opener, ProxyHandler
+    from urllib.request import urlopen, Request, build_opener, ProxyHandler, HTTPSHandler
     from urllib.error import URLError, HTTPError
     import base64 as _base64
     def _make_auth_header(user, passwd):
@@ -15,18 +16,24 @@ try:
         ).decode()
         return "Basic {}".format(token)
 except ImportError:
-    from urllib2 import urlopen, Request, build_opener, ProxyHandler, URLError, HTTPError
+    from urllib2 import urlopen, Request, build_opener, ProxyHandler, HTTPSHandler, URLError, HTTPError
     import base64 as _base64
     def _make_auth_header(user, passwd):
         token = _base64.b64encode("{}:{}".format(user, passwd))
         return "Basic {}".format(token)
 
 
-def _cm_open(req, timeout, no_proxy=False):
-    # type: (Request, int, bool) -> object
-    """Open CM API request, optionally bypassing system HTTP proxy."""
+def _cm_open(req, timeout, no_proxy=False, ssl_insecure=False):
+    # type: (Request, int, bool, bool) -> object
+    """Open CM API request, optionally bypassing system HTTP proxy and/or
+    skipping TLS certificate verification (Auto-TLS/self-signed CM)."""
+    handlers = []
     if no_proxy:
-        return build_opener(ProxyHandler({})).open(req, timeout=timeout)
+        handlers.append(ProxyHandler({}))
+    if ssl_insecure:
+        handlers.append(HTTPSHandler(context=ssl._create_unverified_context()))
+    if handlers:
+        return build_opener(*handlers).open(req, timeout=timeout)
     return urlopen(req, timeout=timeout)
 
 from checks.base import CheckBase, CheckResult
@@ -38,13 +45,14 @@ class ClouderaClient(object):
     """Client HTTP minimale per Cloudera Manager REST API. Zero deps."""
 
     def __init__(self, base_url, user, password, cluster_name, api_version="v40",
-                 no_proxy=False):
-        # type: (str, str, str, str, str, bool) -> None
+                 no_proxy=False, ssl_insecure=False):
+        # type: (str, str, str, str, str, bool, bool) -> None
         self.base_url     = base_url.rstrip("/")
         self.auth_header  = _make_auth_header(user, password)
         self.cluster_name = cluster_name
         self.api_version  = api_version
         self.no_proxy     = no_proxy
+        self.ssl_insecure = ssl_insecure
 
     def get(self, path):
         # type: (str) -> dict
@@ -55,7 +63,8 @@ class ClouderaClient(object):
         req.add_header("Authorization", self.auth_header)
         req.add_header("Accept", "application/json")
         try:
-            resp = _cm_open(req, timeout=TIMEOUT, no_proxy=self.no_proxy)
+            resp = _cm_open(req, timeout=TIMEOUT, no_proxy=self.no_proxy,
+                            ssl_insecure=self.ssl_insecure)
             return json.loads(resp.read().decode("utf-8"))
         except HTTPError as e:
             raise IOError("CM HTTP {}: {} — {}".format(e.code, e.reason, url))
@@ -72,7 +81,8 @@ class ClouderaClient(object):
         req.add_header("Authorization", self.auth_header)
         req.add_header("Accept", "application/json")
         try:
-            resp = _cm_open(req, timeout=TIMEOUT, no_proxy=self.no_proxy)
+            resp = _cm_open(req, timeout=TIMEOUT, no_proxy=self.no_proxy,
+                            ssl_insecure=self.ssl_insecure)
             return json.loads(resp.read().decode("utf-8"))
         except HTTPError as e:
             raise IOError("CM HTTP {}: {} — {}".format(e.code, e.reason, url))
@@ -91,6 +101,7 @@ def _make_cm_client(config):
         cluster_name = config["cluster_name"],
         api_version  = config.get("cm_api_version", "v40"),
         no_proxy     = config.get("no_proxy", False),
+        ssl_insecure = config.get("ssl_insecure", False),
     )
 
 
@@ -298,4 +309,85 @@ class ClouderaNameNodeHACheck(CheckBase):
             message="NameNode HA OK — active: {}, standby: {}".format(
                 ", ".join(active), ", ".join(standby)),
             details={"active": active, "standby": standby}
+        )
+
+
+class ClouderaClusterInfoCheck(CheckBase):
+    """Informazioni versione — CM, CDP, e presenza/versione di un eventuale
+    cluster CDP Private Cloud Data Services (ECS) registrato sulla stessa
+    Cloudera Manager. Puramente informativo per la dashboard 'at a
+    glance': nessuna soglia, sempre OK se raggiungibile — non è un check
+    di salute.
+
+    Il cluster Data Services NON compare in GET /clusters (l'endpoint di
+    lista lo filtra) — va scoperto enumerando gli host (campo
+    clusterRef.clusterName su GET /hosts) e poi interrogato per nome con
+    GET /clusters/{name}. clusterType == "EXPERIENCE_CLUSTER" identifica
+    CDP Private Cloud Data Services — verificato contro un ambiente reale
+    (MdS dev: cluster "dsDEV", versione 1.5.5). Qualunque altro
+    clusterType inatteso viene comunque segnalato con il valore raw, per
+    non nascondere sorprese su ambienti diversi.
+    """
+
+    requires = []
+
+    def run(self):
+        # type: () -> CheckResult
+        cluster_name = self.config.get("cluster_name")
+        try:
+            client       = _make_cm_client(self.config)
+            cm_version   = client.get_raw("cm/version")
+            this_cluster = client.get_raw("clusters/{}".format(cluster_name))
+            hosts        = client.get_raw("hosts?view=full")
+        except IOError as e:
+            return CheckResult(
+                name="ClouderaClusterInfo",
+                status=CheckResult.UNKNOWN,
+                message=str(e)
+            )
+
+        extra_names = set()
+        for h in hosts.get("items", []):
+            ref  = h.get("clusterRef") or {}
+            name = ref.get("clusterName")
+            if name and name != cluster_name:
+                extra_names.add(name)
+
+        data_services = []
+        for name in sorted(extra_names):
+            try:
+                c = client.get_raw("clusters/{}".format(name))
+            except IOError:
+                continue
+            data_services.append({
+                "name":        name,
+                "clusterType": c.get("clusterType", "?"),
+                "version":     c.get("fullVersion", "?"),
+            })
+
+        details = {
+            "cm_version":    cm_version.get("version", "?"),
+            "cdp_version":   this_cluster.get("fullVersion", "?"),
+            "data_services": bool(data_services),
+        }
+        if data_services:
+            details["data_services_clusters"] = data_services
+
+        msg = "CM {} — CDP {}".format(details["cm_version"], details["cdp_version"])
+        if data_services:
+            ds_str = ", ".join(
+                "{} ({})".format(d["name"], d["version"])
+                if d["clusterType"] == "EXPERIENCE_CLUSTER"
+                else "{} ({}, {})".format(d["name"], d["clusterType"], d["version"])
+                for d in data_services
+            )
+            msg += " — Data Services: {}".format(ds_str)
+        else:
+            msg += " — nessun servizio Data Services rilevato"
+
+        return CheckResult(
+            name="ClouderaClusterInfo",
+            status=CheckResult.OK,
+            message=msg,
+            details=details
         )

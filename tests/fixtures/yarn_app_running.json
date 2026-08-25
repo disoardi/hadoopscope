@@ -1,0 +1,19 @@
+{
+  "app": {
+    "id": "application_1699999999999_0001",
+    "user": "hdfs",
+    "name": "example-job",
+    "queue": "default",
+    "state": "RUNNING",
+    "finalStatus": "UNDEFINED",
+    "progress": 42.5,
+    "applicationType": "SPARK",
+    "diagnostics": "",
+    "startedTime": 1699999999000,
+    "finishedTime": 0,
+    "elapsedTime": 125000,
+    "allocatedMB": 4096,
+    "allocatedVCores": 2,
+    "runningContainers": 3
+  }
+}
