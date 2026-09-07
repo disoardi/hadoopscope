@@ -1,9 +1,13 @@
-"""Persistenza sqlite dello stato dei check — 'at a glance' per la TUI.
+"""Persistenza dello stato dei check — 'at a glance' per la TUI.
 
-Schema a righe fisse: una riga per coppia (env, check_name), sempre
-sovrascritta (INSERT OR REPLACE). La tabella non cresce mai, zero
-cleanup necessario — stesso principio già usato per download_dir nel
-layer Ops.
+Backend sqlite3 se disponibile (schema a righe fisse, una riga per coppia
+(env, check_name), sempre sovrascritta con INSERT OR REPLACE — la tabella
+non cresce mai, zero cleanup necessario). Fallback automatico a JSON+flock
+se sqlite3 non e' disponibile nell'interprete (l'estensione C _sqlite3
+manca — build pyenv compilata senza sqlite-devel, visto su un ambiente
+client locked-down senza accesso root per rebuildare Python). Stessa API
+pubblica, stessa semantica di upsert, in entrambi i casi — i chiamanti
+(tui/, hadoopscope.py) non sanno quale backend e' attivo.
 """
 
 from __future__ import print_function
@@ -11,7 +15,13 @@ from __future__ import print_function
 import datetime
 import json
 import os
-import sqlite3
+
+try:
+    import sqlite3
+    _HAS_SQLITE = True
+except ImportError:
+    sqlite3 = None
+    _HAS_SQLITE = False
 
 _DEFAULT_DB_PATH = os.path.expanduser("~/.hadoopscope/state.db")
 _DB_PATH = None  # type: object
@@ -21,7 +31,7 @@ _SEVERITY = {"CRITICAL": 3, "WARNING": 2, "UNKNOWN": 1, "SKIPPED": 1, "OK": 0}
 
 def init(db_path=None):
     # type: (object) -> None
-    """Inizializza il path del DB e crea la tabella se non esiste.
+    """Inizializza il path del DB e crea la tabella/il file se non esiste.
 
     db_path=None usa il default ~/.hadoopscope/state.db. Chiamare più
     volte è sicuro (idempotente) — usato sia dal main loop sia dai test.
@@ -31,7 +41,51 @@ def init(db_path=None):
     parent = os.path.dirname(_DB_PATH)
     if parent and not os.path.isdir(parent):
         os.makedirs(parent)
-    conn = _connect()
+    if _HAS_SQLITE:
+        _sqlite_init()
+    else:
+        _json_init()
+
+
+def save_result(env_name, result):
+    # type: (str, object) -> None
+    """Upsert la riga (env, check_name) con lo stato corrente."""
+    if _HAS_SQLITE:
+        _sqlite_save_result(env_name, result)
+    else:
+        _json_save_result(env_name, result)
+
+
+def get_env_summary(env_name):
+    # type: (str) -> list
+    """Tutte le righe per un singolo env — per il drill-down Home."""
+    if _HAS_SQLITE:
+        return _sqlite_get_env_summary(env_name)
+    return _json_get_env_summary(env_name)
+
+
+def get_all_envs_summary():
+    # type: () -> list
+    """Per env: stato peggiore, conteggi per status, run più vecchio."""
+    if _HAS_SQLITE:
+        return _sqlite_get_all_envs_summary()
+    return _json_get_all_envs_summary()
+
+
+# ---------------------------------------------------------------------------
+# Backend sqlite3
+# ---------------------------------------------------------------------------
+
+def _sqlite_connect():
+    # type: () -> object
+    conn = sqlite3.connect(_DB_PATH or _DEFAULT_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _sqlite_init():
+    # type: () -> None
+    conn = _sqlite_connect()
     try:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS check_state ("
@@ -45,18 +99,9 @@ def init(db_path=None):
         conn.close()
 
 
-def _connect():
-    # type: () -> sqlite3.Connection
-    path = _DB_PATH or _DEFAULT_DB_PATH
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def save_result(env_name, result):
+def _sqlite_save_result(env_name, result):
     # type: (str, object) -> None
-    """INSERT OR REPLACE la riga (env, check_name) con lo stato corrente."""
-    conn = _connect()
+    conn = _sqlite_connect()
     try:
         conn.execute(
             "INSERT OR REPLACE INTO check_state "
@@ -71,36 +116,152 @@ def save_result(env_name, result):
         conn.close()
 
 
-def get_env_summary(env_name):
+def _sqlite_get_env_summary(env_name):
     # type: (str) -> list
-    """Tutte le righe check_state per un singolo env — per il drill-down Home."""
-    conn = _connect()
+    conn = _sqlite_connect()
     try:
         cur = conn.execute(
             "SELECT env, check_name, status, message, details, run_at "
             "FROM check_state WHERE env = ? ORDER BY check_name",
             (env_name,)
         )
-        return [_row_to_dict(r) for r in cur.fetchall()]
+        return [_sqlite_row_to_dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
 
 
-def get_all_envs_summary():
+def _sqlite_get_all_envs_summary():
     # type: () -> list
-    """Per env: stato peggiore, conteggi per status — per la grid Home."""
-    conn = _connect()
+    conn = _sqlite_connect()
     try:
         cur = conn.execute("SELECT env, status, run_at FROM check_state ORDER BY env")
-        by_env = {}       # type: dict
-        oldest_by_env = {}  # type: dict
-        for row in cur.fetchall():
-            by_env.setdefault(row["env"], []).append(row["status"])
-            prev = oldest_by_env.get(row["env"])
-            if prev is None or row["run_at"] < prev:
-                oldest_by_env[row["env"]] = row["run_at"]
+        rows = [{"env": r["env"], "status": r["status"], "run_at": r["run_at"]}
+                for r in cur.fetchall()]
     finally:
         conn.close()
+    return _aggregate_envs(rows)
+
+
+def _sqlite_row_to_dict(row):
+    # type: (object) -> dict
+    return {
+        "env": row["env"],
+        "check_name": row["check_name"],
+        "status": row["status"],
+        "message": row["message"],
+        "details": json.loads(row["details"]) if row["details"] else {},
+        "run_at": row["run_at"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Backend JSON + flock — attivo solo quando sqlite3 non e' disponibile.
+#
+# Stessa granularita' di upsert di sqlite (chiave env+check_name): ogni
+# read-modify-write prende un lock esclusivo sull'intero file, cosi' due
+# processi concorrenti (es. due --env diversi lanciati dallo stesso cron)
+# non si sovrascrivono a vicenda anche se toccano chiavi diverse — stessa
+# garanzia della transazione INSERT OR REPLACE di sqlite, solo piu' grezza
+# (lock sul file intero anziche' sulla singola riga).
+#
+# import fcntl e' locale alle funzioni (non a livello di modulo): e' POSIX-
+# only, e non deve diventare un requisito quando sqlite3 e' disponibile
+# (percorso di gran lunga piu' comune).
+# ---------------------------------------------------------------------------
+
+def _json_path():
+    # type: () -> str
+    return _DB_PATH or _DEFAULT_DB_PATH
+
+
+def _json_init():
+    # type: () -> None
+    path = _json_path()
+    if not os.path.exists(path):
+        with open(path, "w") as f:
+            json.dump({}, f)
+
+
+def _json_with_lock(mutate):
+    # type: (object) -> object
+    """Apre il file sotto lock esclusivo, decodifica lo stato corrente,
+    applica mutate(data) (puo' modificare data in place e/o ritornare un
+    valore), riscrive il file per intero, ritorna il valore di mutate()."""
+    import fcntl
+    path = _json_path()
+    with open(path, "a+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            f.seek(0)
+            raw = f.read()
+            try:
+                data = json.loads(raw) if raw.strip() else {}
+            except ValueError:
+                data = {}
+            result = mutate(data)
+            f.seek(0)
+            f.truncate()
+            json.dump(data, f)
+            f.flush()
+            os.fsync(f.fileno())
+            return result
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def _json_save_result(env_name, result):
+    # type: (str, object) -> None
+    def mutate(data):
+        env_rows = data.setdefault(env_name, {})
+        env_rows[result.name] = {
+            "status": result.status,
+            "message": result.message,
+            "details": result.details or {},
+            "run_at": datetime.datetime.now().isoformat(),
+        }
+    _json_with_lock(mutate)
+
+
+def _json_get_env_summary(env_name):
+    # type: (str) -> list
+    def mutate(data):
+        env_rows = data.get(env_name, {})
+        return [
+            {
+                "env": env_name, "check_name": check_name,
+                "status": row["status"], "message": row["message"],
+                "details": row["details"], "run_at": row["run_at"],
+            }
+            for check_name, row in sorted(env_rows.items())
+        ]
+    return _json_with_lock(mutate)
+
+
+def _json_get_all_envs_summary():
+    # type: () -> list
+    def mutate(data):
+        rows = []
+        for env_name, env_rows in data.items():
+            for row in env_rows.values():
+                rows.append({"env": env_name, "status": row["status"], "run_at": row["run_at"]})
+        return rows
+    rows = _json_with_lock(mutate)
+    return _aggregate_envs(rows)
+
+
+# ---------------------------------------------------------------------------
+# Aggregazione condivisa dai due backend
+# ---------------------------------------------------------------------------
+
+def _aggregate_envs(rows):
+    # type: (list) -> list
+    by_env = {}         # type: dict
+    oldest_by_env = {}   # type: dict
+    for row in rows:
+        by_env.setdefault(row["env"], []).append(row["status"])
+        prev = oldest_by_env.get(row["env"])
+        if prev is None or row["run_at"] < prev:
+            oldest_by_env[row["env"]] = row["run_at"]
 
     summary = []
     for env, statuses in by_env.items():
@@ -115,15 +276,3 @@ def get_all_envs_summary():
             "oldest_run_at": oldest_by_env[env],
         })
     return summary
-
-
-def _row_to_dict(row):
-    # type: (sqlite3.Row) -> dict
-    return {
-        "env": row["env"],
-        "check_name": row["check_name"],
-        "status": row["status"],
-        "message": row["message"],
-        "details": json.loads(row["details"]) if row["details"] else {},
-        "run_at": row["run_at"],
-    }
