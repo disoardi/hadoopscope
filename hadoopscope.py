@@ -18,7 +18,6 @@ from checks.base import CheckResult
 import debug as _debug
 import applog as _applog
 from ops import build_ops_registry
-import state_store
 
 # Stato del run corrente, aggiornato da run_checks_for_env — letto dal signal
 # handler per loggare un'interruzione esplicita invece di un RUN START orfano
@@ -362,6 +361,10 @@ def main():
 
     # Inizializza logger rotante (usa i default se sezione logging assente)
     _applog.setup(cfg)
+    # Import lazy: sqlite3 e' stdlib ma non garantito presente su ogni build
+    # (es. pyenv compilato senza sqlite-devel) — solo il run principale lo
+    # richiede, non ops/--version/--show-capabilities.
+    import state_store
     state_store.init()
 
     # Interruzione manuale o da watchdog esterno -> log esplicito invece di
