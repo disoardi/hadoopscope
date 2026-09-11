@@ -458,6 +458,66 @@ class NameNodeHACheck(CheckBase):
         )
 
 
+class AmbariHostHealthCheck(CheckBase):
+    """Conta gli host che mandano heartbeat regolare (agent Ambari) sul
+    totale degli host registrati nel cluster — 'at a glance' per la
+    dashboard Home. host_state == HEARTBEAT_LOST e' il segnale diretto di
+    agent che ha smesso di rispondere (enum Ambari: HEALTHY, UNHEALTHY,
+    HEARTBEAT_LOST, INIT, WAITING_FOR_HOST_STATUS_UPDATES, UNKNOWN).
+    """
+
+    requires = []  # pura API REST
+
+    def run(self):
+        # type: () -> CheckResult
+        try:
+            client = _make_ambari_client(self.config)
+            data   = client.get(
+                "hosts?fields=Hosts/host_name,Hosts/host_state"
+            )
+        except IOError as e:
+            return CheckResult(
+                name="HostHealth",
+                status=CheckResult.UNKNOWN,
+                message=str(e)
+            )
+
+        items = data.get("items", [])
+        if not items:
+            return CheckResult(
+                name="HostHealth",
+                status=CheckResult.UNKNOWN,
+                message="No hosts returned by Ambari"
+            )
+
+        down = []
+        for item in items:
+            info  = item.get("Hosts", {})
+            host  = info.get("host_name", "?")
+            state = info.get("host_state", "UNKNOWN")
+            if state != "HEALTHY":
+                down.append("{} ({})".format(host, state))
+
+        total  = len(items)
+        active = total - len(down)
+        details = {"total": total, "active": active}
+
+        if down:
+            return CheckResult(
+                name="HostHealth",
+                status=CheckResult.WARNING,
+                message="{}/{} hosts active — down: {}".format(
+                    active, total, ", ".join(down)),
+                details=details
+            )
+        return CheckResult(
+            name="HostHealth",
+            status=CheckResult.OK,
+            message="{}/{} hosts active".format(active, total),
+            details=details
+        )
+
+
 class NameNodeBlocksCheck(CheckBase):
     """Verifica lo stato funzionale del NameNode attivo: SafeMode, blocchi corrotti/mancanti,
     NameDir fallite e blocchi sotto-replicati.

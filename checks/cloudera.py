@@ -312,6 +312,76 @@ class ClouderaNameNodeHACheck(CheckBase):
         )
 
 
+class ClouderaHostHealthCheck(CheckBase):
+    """Conta gli host che mandano heartbeat regolare (agent Cloudera
+    Manager) sul totale degli host registrati nel cluster — 'at a glance'
+    per la dashboard Home. Usa healthSummary per host (stesso enum GOOD/
+    CONCERNING/BAD/NOT_AVAILABLE gia' usato da ClouderaServiceHealthCheck
+    per i servizi) — MAI verificato contro un CM reale, da confermare
+    durante il test su MdS/INAIL prima del merge: se il campo non e'
+    presente nella risposta, fallisce esplicito con UNKNOWN invece di
+    contare in silenzio 0 host attivi (stesso principio del gotcha
+    HttpFS-vs-NameNode-WebUI documentato in CLAUDE.md — un falso negativo
+    silenzioso e' peggio di un errore esplicito).
+    """
+
+    requires = []
+
+    def run(self):
+        # type: () -> CheckResult
+        try:
+            client = _make_cm_client(self.config)
+            data   = client.get_raw("hosts?view=full")
+        except IOError as e:
+            return CheckResult(
+                name="HostHealth",
+                status=CheckResult.UNKNOWN,
+                message=str(e)
+            )
+
+        items = data.get("items", [])
+        if not items:
+            return CheckResult(
+                name="HostHealth",
+                status=CheckResult.UNKNOWN,
+                message="No hosts returned by Cloudera Manager"
+            )
+
+        if not any("healthSummary" in h for h in items):
+            return CheckResult(
+                name="HostHealth",
+                status=CheckResult.UNKNOWN,
+                message="healthSummary field missing from GET /hosts response — "
+                        "verify Cloudera Manager API version/response shape"
+            )
+
+        down = []
+        for h in items:
+            hostname = h.get("hostname", "?")
+            health   = h.get("healthSummary", "NOT_AVAILABLE")
+            if health != "GOOD":
+                down.append("{} ({})".format(hostname, health))
+
+        total  = len(items)
+        active = total - len(down)
+        details = {"total": total, "active": active}
+
+        if down:
+            return CheckResult(
+                name="HostHealth",
+                status=CheckResult.WARNING,
+                message="{}/{} hosts active — down: {}".format(
+                    active, total, ", ".join(down)),
+                details=details
+            )
+        return CheckResult(
+            name="HostHealth",
+            status=CheckResult.OK,
+            message="{}/{} hosts active".format(active, total),
+            details=details
+        )
+
+
 class ClouderaClusterInfoCheck(CheckBase):
     """Informazioni versione — CM, CDP, e presenza/versione di un eventuale
     cluster CDP Private Cloud Data Services (ECS) registrato sulla stessa

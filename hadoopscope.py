@@ -76,14 +76,14 @@ def build_check_registry(env_config, caps):
     """Costruisce il check_registry per l'environment dato."""
     from checks.ambari import (
         AmbariServiceHealthCheck, NameNodeHACheck, NameNodeBlocksCheck,
-        ClusterAlertsCheck, ConfigStalenessCheck
+        ClusterAlertsCheck, ConfigStalenessCheck, AmbariHostHealthCheck
     )
     from checks.webhdfs import HdfsSpaceCheck, HdfsDataNodeCheck, HdfsWritabilityCheck
     from checks.yarn import YarnNodeHealthCheck, YarnQueueCheck, YarnClusterMetricsCheck
     from checks.hive import HiveCheck, HivePartitionCheck
     from checks.cloudera import (
         ClouderaServiceHealthCheck, ClouderaParcelCheck, ClouderaNameNodeHACheck,
-        ClouderaClusterInfoCheck,
+        ClouderaClusterInfoCheck, ClouderaHostHealthCheck,
     )
 
     env_type = env_config.get("type", "hdp")
@@ -94,6 +94,7 @@ def build_check_registry(env_config, caps):
             ClouderaParcelCheck,
             ClouderaNameNodeHACheck,
             ClouderaClusterInfoCheck,
+            ClouderaHostHealthCheck,
         ]
     else:
         health_checks = [
@@ -102,6 +103,7 @@ def build_check_registry(env_config, caps):
             NameNodeBlocksCheck,
             ClusterAlertsCheck,
             ConfigStalenessCheck,
+            AmbariHostHealthCheck,
         ]
 
     return {

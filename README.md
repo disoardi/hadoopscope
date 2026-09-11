@@ -86,11 +86,14 @@ capo, non resta mai bloccato sull'ultima schermata visitata:
 
 - **Home** — stato riassuntivo di tutti i cluster configurati (↑↓←→ per
   navigare le card, Invio per il dettaglio per servizio, ↑↓/PgUp/PgDn per
-  scorrere il dettaglio). Un thread in background esegue il poll delle
-  metriche YARN (app running/pending) ogni 30s per ogni ambiente
-  configurato, così la dashboard resta aggiornata anche senza lanciare
-  check manualmente. Una card segnala `⚠ dati vecchi Nh, rilancia` se
-  nessun check gira da più di 24 ore
+  scorrere il dettaglio). Ogni card mostra, oltre allo stato peggiore:
+  spazio HDFS usato, app YARN running/pending, host attivi (agent con
+  heartbeat) su totale, DataNode rilevati dai NameNode su totale, e
+  NodeManager rilevati dal ResourceManager su totale. Un thread in
+  background esegue il poll delle metriche YARN (app running/pending)
+  ogni 30s per ogni ambiente configurato, così la dashboard resta
+  aggiornata anche senza lanciare check manualmente. Una card segnala
+  `⚠ dati vecchi Nh, rilancia` se nessun check gira da più di 24 ore
 - **Monitoring** — esegui check on-demand (con opzione di schedularli via
   crontab) o gestisci i check già schedulati
 - **Ops** — tool operativi on-demand (es. status/log di un'applicazione

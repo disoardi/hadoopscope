@@ -1,0 +1,7 @@
+{
+  "items": [
+    {"hostId": "h1", "hostname": "vmgclalpr1614.corp.com", "healthSummary": "GOOD"},
+    {"hostId": "h2", "hostname": "vmgclalpr1616.corp.com", "healthSummary": "GOOD"},
+    {"hostId": "h3", "hostname": "vmgclalpr1619.corp.com", "healthSummary": "GOOD"}
+  ]
+}

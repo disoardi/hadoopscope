@@ -62,12 +62,18 @@ class HomeGridScreen(Screen):
             by_check = {r["check_name"]: r for r in state_store.get_env_summary(env)}
             hdfs = by_check.get("HdfsSpace")
             yarn = by_check.get("YarnClusterMetrics")
+            hosts = by_check.get("HostHealth")
+            datanodes = by_check.get("HdfsDataNodes")
+            nodemanagers = by_check.get("YarnNodeHealth")
             self.envs.append({
                 "env": env,
                 "worst_status": row["worst_status"] if row else None,
                 "counts": row["counts"] if row else {},
                 "hdfs": hdfs["details"] if hdfs else None,
                 "yarn": yarn["details"] if yarn else None,
+                "hosts": hosts["details"] if hosts else None,
+                "datanodes": datanodes["details"] if datanodes else None,
+                "nodemanagers": nodemanagers["details"] if nodemanagers else None,
                 "stale_hours": _age_hours(row["oldest_run_at"]) if row else None,
             })
         if self.cursor >= len(self.envs):
@@ -77,7 +83,7 @@ class HomeGridScreen(Screen):
         # type: (object) -> None
         safe_addstr(stdscr, 0, 20, "HOME — {} environment(s) configurati".format(len(self.envs)),
                    curses.A_BOLD)
-        col_w, row_h = 26, 9
+        col_w, row_h = 26, 12
         for i, entry in enumerate(self.envs):
             col = i % 3
             row = i // 3
@@ -103,6 +109,24 @@ class HomeGridScreen(Screen):
                                "YARN: {} run / {} pend".format(
                                    entry["yarn"].get("appsRunning", 0),
                                    entry["yarn"].get("appsPending", 0))[:col_w - 4])
+                    line_y += 1
+                if entry["hosts"]:
+                    safe_addstr(stdscr, line_y, x + 2,
+                               "Host: {}/{}".format(
+                                   entry["hosts"].get("active", 0),
+                                   entry["hosts"].get("total", 0))[:col_w - 4])
+                    line_y += 1
+                if entry["datanodes"]:
+                    live = entry["datanodes"].get("live", 0)
+                    dead = entry["datanodes"].get("dead", 0)
+                    safe_addstr(stdscr, line_y, x + 2,
+                               "DN: {}/{}".format(live, live + dead)[:col_w - 4])
+                    line_y += 1
+                if entry["nodemanagers"]:
+                    safe_addstr(stdscr, line_y, x + 2,
+                               "RM: {}/{}".format(
+                                   entry["nodemanagers"].get("running", 0),
+                                   entry["nodemanagers"].get("total", 0))[:col_w - 4])
                     line_y += 1
                 if entry["stale_hours"] is not None and entry["stale_hours"] >= _STALE_AFTER_HOURS:
                     safe_addstr(stdscr, line_y, x + 2,
