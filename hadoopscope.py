@@ -398,7 +398,8 @@ def main():
 
         for r in results:
             _applog.log_result(r)
-            state_store.save_result(env_name, r)
+            if not args.dry_run:
+                state_store.save_result(env_name, r)
         _applog.log_run_end(env_name, results)
         _run_state["env"] = None
 

@@ -163,7 +163,7 @@ class HomeDetailScreen(Screen):
         for row in self.rows[self.scroll:self.scroll + visible]:
             attr = curses.color_pair(_STATUS_COLOR.get(row["status"], C_DIM))
             safe_addstr(stdscr, y, 20, "[{}] {}".format(row["status"], row["check_name"]), attr | curses.A_BOLD)
-            safe_addstr(stdscr, y + 1, 22, row["message"].splitlines()[0][:70], curses.color_pair(C_DIM))
+            safe_addstr(stdscr, y + 1, 22, row["message"].splitlines()[0], curses.color_pair(C_DIM))
             y += _ROW_H
         footer = "↑↓ scorri · ESC torna alla grid"
         if len(self.rows) > visible:
