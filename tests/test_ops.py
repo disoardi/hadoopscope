@@ -2,6 +2,7 @@
 
 from __future__ import print_function
 
+import json
 import os
 import sys
 
@@ -197,6 +198,12 @@ def test_app_status_not_found_anywhere():
 
 
 def test_app_status_kinit_called_when_kerberos_enabled():
+    """kerberos=True fa passare _yarn_get() dal ramo 'curl --negotiate' (subprocess),
+    non da urllib — un vero handshake SPNEGO non e' riproducibile in CI (nessun
+    KDC/ticket cache reale, anche con kinit mockato). subprocess.check_output e'
+    mockato per restituire la fixture cosi' il test verifica solo cio' che gli
+    compete (kinit invocato coi parametri giusti + il check completa OK), non
+    la riuscita di una negoziazione Kerberos reale."""
     fixture = load_fixture("yarn_app_running.json")
     server, port = start_mock_server({
         "/ws/v1/cluster/apps/application_1699999999999_0001": fixture,
@@ -209,10 +216,12 @@ def test_app_status_kinit_called_when_kerberos_enabled():
             },
         }
         tool = AppStatusTool(config=cfg, caps={})
-        with mock.patch("checks.yarn.kerberos_utils.kinit") as mocked_kinit:
+        with mock.patch("checks.yarn.kerberos_utils.kinit") as mocked_kinit, \
+             mock.patch("checks.yarn.subprocess.check_output") as mocked_curl:
+            mocked_curl.return_value = json.dumps(fixture).encode("utf-8")
             result = tool.run(app_id="application_1699999999999_0001")
         mocked_kinit.assert_called_once_with("/x.keytab", "svc@REALM")
-        assert result.status == CheckResult.OK
+        assert result.status == CheckResult.OK, "{}: {}".format(result.status, result.message)
     finally:
         server.shutdown()
 
