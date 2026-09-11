@@ -166,6 +166,7 @@ GET /api/v1/clusters/{name}/services/HDFS/components/NAMENODE
 GET /api/v1/clusters/{name}/alerts?fields=*&Alert/state=CRITICAL
 
 GET /api/v1/clusters/{name}/hosts?fields=Hosts/host_state,Hosts/host_status
+    → Hosts.host_state: HEALTHY | UNHEALTHY | HEARTBEAT_LOST | ... (AmbariHostHealthCheck)
 ```
 
 ### WebHDFS (HDFS, no client)
@@ -187,6 +188,10 @@ GET /api/v40/clusters/{name}/services
 
 GET /api/v40/clusters/{name}/parcels
     → stage: ACTIVATED | AVAILABLE_REMOTELY | DOWNLOADING | ...
+
+GET /api/v40/hosts?view=full
+    → healthSummary: GOOD | CONCERNING | BAD | NOT_AVAILABLE (ClouderaHostHealthCheck) —
+      MAI verificato contro un CM reale, vedi Known Gotchas sotto
 ```
 
 ### YARN RM
@@ -411,6 +416,17 @@ WebUI**, porta 9871 con Auto-TLS (9870 senza TLS) — `webhdfs.url` (HttpFS) e
 se sembrano ridondanti. **Pericoloso**: puntare `namenode_urls` alla porta HttpFS
 non dà errore esplicito — restituisce `CapacityTotal=0`/"0 live DataNodes" (falso
 negativo silenzioso), non un errore di connessione.
+
+### `ClouderaHostHealthCheck` — campo `healthSummary` per host, mai validato su CM reale
+Il check conta gli host attivi via `GET /hosts?view=full`, campo `healthSummary`
+per ogni item (stesso enum GOOD/CONCERNING/BAD/NOT_AVAILABLE già usato da
+`ClouderaServiceHealthCheck` per i servizi). Scritto per analogia col pattern
+esistente, **mai testato contro un Cloudera Manager reale** al momento
+dell'implementazione (issue #9). Se il campo non è presente nella risposta,
+il check ritorna esplicitamente `UNKNOWN` (non conta silenziosamente 0 host
+attivi — stesso principio del gotcha HttpFS-vs-NameNode-WebUI sopra). Se sul
+campo reale si trova un nome diverso, correggere `checks/cloudera.py::ClouderaHostHealthCheck`
+e questa nota.
 
 ---
 

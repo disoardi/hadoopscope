@@ -23,10 +23,13 @@ from checks.base import CheckBase, CheckResult
 from checks.ambari import (
     AmbariServiceHealthCheck, ClusterAlertsCheck,
     ConfigStalenessCheck, NameNodeHACheck, NameNodeBlocksCheck,
+    AmbariHostHealthCheck,
 )
 from checks.webhdfs import HdfsDataNodeCheck, HdfsSpaceCheck
 from checks.yarn import YarnNodeHealthCheck, YarnQueueCheck, YarnClusterMetricsCheck
-from checks.cloudera import ClouderaServiceHealthCheck, ClouderaClusterInfoCheck
+from checks.cloudera import (
+    ClouderaServiceHealthCheck, ClouderaClusterInfoCheck, ClouderaHostHealthCheck,
+)
 from checks.hive import (
     _build_beeline_url, _build_beeline_cmd, _merge_ns_cfg, _zk_host_str, _label_from_cfg,
     _extract_stdout, _extract_stderr, _parse_databases_output, _parse_partition_output,
@@ -393,6 +396,51 @@ def test_namenode_ha_ambari26_metrics_ha_state_ok():
             "metrics HAState should resolve HA state on Ambari 2.6.x: {}: {}".format(
                 result.status, result.message)
         assert "Active" in result.message
+    finally:
+        server.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Test: AmbariHostHealthCheck
+# ---------------------------------------------------------------------------
+
+def test_ambari_host_health_ok():
+    fixture = load_fixture("ambari_hosts_ok.json")
+    route_map = {"/api/v1/clusters/": fixture}
+    server, port = start_mock_server(route_map)
+
+    config = {
+        "ambari_url": "http://127.0.0.1:{}".format(port),
+        "ambari_user": "admin",
+        "ambari_pass": "admin",
+        "cluster_name": "test-cluster",
+    }
+    try:
+        check  = AmbariHostHealthCheck(config, {})
+        result = check.run()
+        assert result.status == CheckResult.OK, "{}: {}".format(result.status, result.message)
+        assert result.details == {"total": 3, "active": 3}
+    finally:
+        server.shutdown()
+
+
+def test_ambari_host_health_one_down():
+    fixture = load_fixture("ambari_hosts_one_down.json")
+    route_map = {"/api/v1/clusters/": fixture}
+    server, port = start_mock_server(route_map)
+
+    config = {
+        "ambari_url": "http://127.0.0.1:{}".format(port),
+        "ambari_user": "admin",
+        "ambari_pass": "admin",
+        "cluster_name": "test-cluster",
+    }
+    try:
+        check  = AmbariHostHealthCheck(config, {})
+        result = check.run()
+        assert result.status == CheckResult.WARNING, "{}: {}".format(result.status, result.message)
+        assert result.details == {"total": 3, "active": 2}
+        assert "hdmasep002.corp.com (HEARTBEAT_LOST)" in result.message
     finally:
         server.shutdown()
 
@@ -981,6 +1029,67 @@ def test_cloudera_cluster_info_connection_error():
     check  = ClouderaClusterInfoCheck(config, {})
     result = check.run()
     assert result.status == CheckResult.UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# Test: ClouderaHostHealthCheck
+# ---------------------------------------------------------------------------
+
+def test_cloudera_host_health_ok():
+    fixture = load_fixture("cloudera_hosts_health_ok.json")
+    route_map = {"/api/v40/hosts": fixture}
+    server, port = start_mock_server(route_map)
+    config = {
+        "cm_url": "http://127.0.0.1:{}".format(port),
+        "cm_user": "admin", "cm_pass": "admin",
+        "cluster_name": "test-cluster", "cm_api_version": "v40",
+    }
+    try:
+        check  = ClouderaHostHealthCheck(config, {})
+        result = check.run()
+        assert result.status == CheckResult.OK, "{}: {}".format(result.status, result.message)
+        assert result.details == {"total": 3, "active": 3}
+    finally:
+        server.shutdown()
+
+
+def test_cloudera_host_health_one_down():
+    fixture = load_fixture("cloudera_hosts_health_one_down.json")
+    route_map = {"/api/v40/hosts": fixture}
+    server, port = start_mock_server(route_map)
+    config = {
+        "cm_url": "http://127.0.0.1:{}".format(port),
+        "cm_user": "admin", "cm_pass": "admin",
+        "cluster_name": "test-cluster", "cm_api_version": "v40",
+    }
+    try:
+        check  = ClouderaHostHealthCheck(config, {})
+        result = check.run()
+        assert result.status == CheckResult.WARNING, "{}: {}".format(result.status, result.message)
+        assert result.details == {"total": 3, "active": 2}
+        assert "vmgclalpr1616.corp.com (BAD)" in result.message
+    finally:
+        server.shutdown()
+
+
+def test_cloudera_host_health_missing_field_returns_unknown():
+    """Se healthSummary non c'e' nella risposta (API diversa dal previsto),
+    fallire esplicito invece di contare in silenzio 0 host attivi."""
+    fixture = load_fixture("cloudera_hosts_no_ds.json")  # nessun campo healthSummary
+    route_map = {"/api/v40/hosts": fixture}
+    server, port = start_mock_server(route_map)
+    config = {
+        "cm_url": "http://127.0.0.1:{}".format(port),
+        "cm_user": "admin", "cm_pass": "admin",
+        "cluster_name": "test-cluster", "cm_api_version": "v40",
+    }
+    try:
+        check  = ClouderaHostHealthCheck(config, {})
+        result = check.run()
+        assert result.status == CheckResult.UNKNOWN, "{}: {}".format(result.status, result.message)
+        assert "healthSummary" in result.message
+    finally:
+        server.shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -1660,6 +1769,8 @@ if __name__ == "__main__":
         test_namenode_ha_ambari26_two_nn_warning,
         test_namenode_ha_ambari26_ha_enabled_config_ok,
         test_namenode_ha_ambari26_metrics_ha_state_ok,
+        test_ambari_host_health_ok,
+        test_ambari_host_health_one_down,
         test_namenode_blocks_ok,
         test_namenode_blocks_safemode_critical,
         test_namenode_blocks_corrupt_critical,
@@ -1683,6 +1794,9 @@ if __name__ == "__main__":
         test_cloudera_cluster_info_with_data_services,
         test_cloudera_cluster_info_without_data_services,
         test_cloudera_cluster_info_connection_error,
+        test_cloudera_host_health_ok,
+        test_cloudera_host_health_one_down,
+        test_cloudera_host_health_missing_field_returns_unknown,
         test_config_manual_parser,
         test_config_load_test_yaml,
         test_beeline_url_direct,

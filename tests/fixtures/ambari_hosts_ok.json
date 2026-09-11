@@ -1,0 +1,7 @@
+{
+  "items": [
+    {"Hosts": {"host_name": "hdmasep001.corp.com", "host_state": "HEALTHY"}},
+    {"Hosts": {"host_name": "hdmasep002.corp.com", "host_state": "HEALTHY"}},
+    {"Hosts": {"host_name": "hdmasep003.corp.com", "host_state": "HEALTHY"}}
+  ]
+}
