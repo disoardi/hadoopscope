@@ -28,6 +28,11 @@
 #     ssh "$h" 'bash -s' < os_inventory.sh && scp "$h":/var/tmp/os-inventory-*.tgz ./inv/
 #   done
 #
+# READ-ONLY: it never modifies the host. The only writes are inside OUT (a new directory it creates)
+# and the final OUT.tgz. A few installed binaries are executed with --version (java, python, R, node...).
+# Secrets: sssd/agent config are filtered, and a masking pass hides password/secret/token values and
+# URL credentials in all collected text. Review the tgz before sending it outside if in doubt.
+#
 # Python 2.7 / 3.x not needed: bash and coreutils only.
 set -uo pipefail
 
@@ -35,6 +40,11 @@ HOST=$(hostname -f 2>/dev/null || hostname)
 TS=$(date +%Y%m%d-%H%M%S)
 OUT=${OUT:-/var/tmp/os-inventory-${HOST}-${TS}}
 FAST=${FAST:-}
+# OUT must not exist: the script only ever writes inside a directory it created itself
+if [ -e "$OUT" ] || [ -e "$OUT.tgz" ]; then
+  echo "ERROR: $OUT (or $OUT.tgz) already exists, choose another OUT" >&2
+  exit 1
+fi
 mkdir -p "$OUT"
 chmod 700 "$OUT"
 
@@ -111,6 +121,12 @@ sec 70_cloudera_agent 'systemctl status cloudera-scm-agent 2>&1 | head -6; grep 
 sec 71_parcels 'ls -la /opt/cloudera/parcels 2>/dev/null; ls /opt/cloudera/parcel-repo 2>/dev/null; ls /opt/cloudera/csd 2>/dev/null'
 sec 72_cloudera_roles_on_host 'ls /var/run/cloudera-scm-agent/process 2>/dev/null | sed -E "s/^[0-9]+-//" | sort -u'
 sec 73_cloudera_data_dirs 'df -h 2>/dev/null | grep -E "dfs|data|kudu|kafka|zookeeper|impala|yarn|nn|dn"; ls -d /dfs/* /data/* /var/lib/zookeeper /var/lib/kudu* /var/lib/hadoop-* /var/lib/impala /var/local/kafka* 2>/dev/null'
+
+# --- mask anything that looks like a secret (command lines, cron, env, URLs with credentials) ---
+sed -E -i \
+  -e 's#(://[^/@[:space:]:]+):[^@/[:space:]]+@#\1:***@#g' \
+  -e 's#([Pp][Aa][Ss][Ss]([Ww][Oo][Rr][Dd]|[Ww][Dd])?|[Pp][Ww][Dd]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn]|[Aa][Uu][Tt][Hh][Tt][Oo][Kk])([=: ]+|[A-Za-z_.-]*[=: ]+)[^[:space:]]+#\1\3***#g' \
+  "$OUT"/*.txt 2>/dev/null || true
 
 # --- pack ---
 tar -czf "$OUT.tgz" -C "$(dirname "$OUT")" "$(basename "$OUT")"
