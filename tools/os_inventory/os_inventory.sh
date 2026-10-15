@@ -18,6 +18,10 @@
 #   bash os_inventory.sh                                # writes /var/tmp/os-inventory-<host>-<ts>.tgz
 #   OUT=/var/tmp/inv bash os_inventory.sh               # custom output directory
 #   FAST=1 bash os_inventory.sh                         # skips the slow parts (du on /opt, /data, /home)
+#   GIVE_TO=<user> bash os_inventory.sh                 # as root: hand the archive to <user> (mode 640) so it
+#                                                       # can be fetched with scp; default is root-only (600)
+#   OUT=/tmp/inv GIVE_TO=<user> bash os_inventory.sh    # archive ends up in /tmp/inv.tgz
+#   The uncompressed directory is removed after packing (KEEP=1 keeps it). No parameter is required.
 #
 # ON MANY HOSTS (from a jump host, as root, with ssh keys)
 #   for h in $(cat hosts.txt); do
@@ -110,7 +114,12 @@ sec 73_cloudera_data_dirs 'df -h 2>/dev/null | grep -E "dfs|data|kudu|kafka|zook
 
 # --- pack ---
 tar -czf "$OUT.tgz" -C "$(dirname "$OUT")" "$(basename "$OUT")"
-chmod 600 "$OUT.tgz"
+if [ -n "${GIVE_TO:-}" ] && [ "$IS_ROOT" -eq 1 ]; then
+  chown "$GIVE_TO" "$OUT.tgz" && chmod 640 "$OUT.tgz"
+else
+  chmod 600 "$OUT.tgz"
+fi
+[ -z "${KEEP:-}" ] && rm -rf "$OUT"
 echo "Done. Archive: $OUT.tgz ($(du -h "$OUT.tgz" | cut -f1))"
 [ "$IS_ROOT" -eq 0 ] && echo "NOTE: not run as root, some sections are incomplete (lvs, ss -p, other users' crontabs)."
 exit 0
