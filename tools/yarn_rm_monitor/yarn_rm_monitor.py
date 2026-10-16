@@ -199,6 +199,7 @@ def main():
     nodes = Csv(os.path.join(OUT, "nodes.csv"), [
         "ts", "host", "state", "usedMB", "availMB", "usedVcores", "availVcores", "numContainers", "health"])
 
+    run_start_ms = int(time.time() * 1000)
     last_raw = 0.0
     fails = 0
     for i in range(SAMPLES):
@@ -262,9 +263,10 @@ def main():
         sys.stdout.flush()
         time.sleep(max(0.0, INTERVAL - (time.time() - t0)))
 
-    # final state of the finished applications (the RM only keeps the most recent ones)
+    # applications finished during the run (a plain limit=N returns the OLDEST N kept by the RM, not the latest)
     try:
-        fin = get_json(rm + "/ws/v1/cluster/apps?states=FINISHED,FAILED,KILLED&limit=5000", timeout=120)
+        fin = get_json(rm + "/ws/v1/cluster/apps?states=FINISHED,FAILED,KILLED&finishedTimeBegin=%d" % run_start_ms,
+                       timeout=120)
         s = json.dumps(fin)
         with io.open(os.path.join(OUT, "apps_finished_end.json"), "w", encoding="utf-8") as f:
             f.write(s if sys.version_info[0] >= 3 else s.decode("utf-8"))
