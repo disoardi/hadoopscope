@@ -118,7 +118,7 @@ fi
 
 # --- Cloudera ---
 sec 70_cloudera_agent 'systemctl status cloudera-scm-agent 2>&1 | head -6; grep -v "^#" /etc/cloudera-scm-agent/config.ini 2>/dev/null | grep -v "^$" | grep -v -i -E "password|secret"; echo; ls -la /var/lib/cloudera-scm-agent 2>/dev/null | head; cat /var/lib/cloudera-scm-agent/uuid 2>/dev/null'
-sec 71_parcels 'ls -la /opt/cloudera/parcels 2>/dev/null; ls /opt/cloudera/parcel-repo 2>/dev/null; ls /opt/cloudera/csd 2>/dev/null'
+sec 71_parcels 'ls -la /opt/cloudera/parcels 2>/dev/null; for d in $(ps -eo args | grep -o "/[^ =:]*/parcels" | sort -u); do echo "## in use: $d"; ls -la "$d" 2>/dev/null | head -20; done; ls /opt/cloudera/parcel-repo 2>/dev/null; ls /opt/cloudera/csd 2>/dev/null; echo; df -h /opt/cloudera 2>/dev/null | tail -1'
 sec 72_cloudera_roles_on_host 'ls /var/run/cloudera-scm-agent/process 2>/dev/null | sed -E "s/^[0-9]+-//" | sort -u'
 sec 73_cloudera_data_dirs 'df -h 2>/dev/null | grep -E "dfs|data|kudu|kafka|zookeeper|impala|yarn|nn|dn"; ls -d /dfs/* /data/* /var/lib/zookeeper /var/lib/kudu* /var/lib/hadoop-* /var/lib/impala /var/local/kafka* 2>/dev/null'
 
@@ -126,7 +126,7 @@ sec 73_cloudera_data_dirs 'df -h 2>/dev/null | grep -E "dfs|data|kudu|kafka|zook
 sed -E -i \
   -e 's#(://[^/@[:space:]:]+):[^@/[:space:]]+@#\1:***@#g' \
   -e 's#([Pp][Aa][Ss][Ss]([Ww][Oo][Rr][Dd]|[Ww][Dd])?|[Pp][Ww][Dd]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn]|[Aa][Uu][Tt][Hh][Tt][Oo][Kk])([=: ]+|[A-Za-z_.-]*[=: ]+)[^[:space:]]+#\1\3***#g' \
-  "$OUT"/*.txt 2>/dev/null || true
+  $(ls "$OUT"/*.txt | grep -v 23_auth_config) 2>/dev/null || true   # nsswitch "passwd:" is not a secret
 
 # --- pack ---
 tar -czf "$OUT.tgz" -C "$(dirname "$OUT")" "$(basename "$OUT")"
