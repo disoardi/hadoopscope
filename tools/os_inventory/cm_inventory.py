@@ -50,6 +50,28 @@ COORDINATOR = set([
     "QUEUEMANAGER_WEBAPP", "QUEUEMANAGER_STORE",
 ])
 
+MASTER_TYPES = set(["NAMENODE", "JOURNALNODE", "SECONDARYNAMENODE", "RESOURCEMANAGER", "JOBHISTORY"])
+UTILITY_TYPES = set(["HIVEMETASTORE", "RANGER_ADMIN", "RANGER_USERSYNC", "RANGER_TAGSYNC", "ATLAS_SERVER", "OOZIE_SERVER",
+                     "SOLR_SERVER", "CATALOGSERVER", "STATESTORE", "LIVY_SERVER", "DAS_WEBAPP", "DAS_EVENT_PROCESSOR"])
+EDGE_TYPES = set(["HUE_SERVER", "HUE_LOAD_BALANCER", "HIVESERVER2", "HTTPFS"])
+
+
+def layer_of(types):
+    """Heuristic layer of a host from its CM role types (same layers as the host templates of the ISP playbook)."""
+    t = set(types)
+    if t & MASTER_TYPES:
+        return "master"
+    if "DATANODE" in t or "NODEMANAGER" in t:
+        return "worker"
+    if "KAFKA_BROKER" in t:
+        return "kafka"
+    if "NIFI_NODE" in t:
+        return "nifi"
+    if t & UTILITY_TYPES:
+        return "utility"
+    return "edge"
+
+
 OUT = os.environ.get("OUT") or "cm-inventory-" + time.strftime("%Y%m%d-%H%M%S")
 BASE = (os.environ.get("CM_URL") or "").rstrip("/")
 ONLY_CLUSTER = os.environ.get("CLUSTER") or ""
@@ -197,9 +219,25 @@ def main():
     for h in (hosts_doc or {}).get("items", []):
         hosts_by_id[h.get("hostId")] = h
 
+    disk_by_host = {}
+    try:  # best effort: total filesystem capacity per host from the time series (metric name checked on CM 7.x)
+        end = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+        start = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - 1800))
+        ts_doc = json.loads(cm.get("/api/%s/timeseries" % cm.api,
+                                   query="SELECT total_capacity_across_filesystems WHERE category = HOST",
+                                   **{"from": start, "to": end, "contentType": "application/json"}))
+        save("host_disk_capacity", ts_doc)
+        for it in ts_doc.get("items", []):
+            for t in it.get("timeSeries", []):
+                pts = [d for d in t.get("data", []) if d.get("value") is not None]
+                if pts:
+                    disk_by_host[t["metadata"]["entityName"]] = pts[-1]["value"]
+    except Exception as e:  # noqa
+        print("note  host disk capacity not available (%s): fill the column from the CM host page" % e)
+
     with open(os.path.join(OUT, "hosts_roles.csv"), "w") as f:
         w = csv.writer(f)
-        w.writerow(["hostname", "ip", "rack", "cores", "ram_gib", "health", "last_heartbeat",
+        w.writerow(["hostname", "ip", "rack", "cores", "ram_gib", "disk_tib", "layer", "health", "last_heartbeat",
                     "n_roles", "stateful_roles", "coordinator_roles", "all_roles"])
         ids = sorted(set(list(rows.keys()) + list(hosts_by_id.keys())),
                      key=lambda i: (hosts_by_id.get(i, {}).get("hostname") or i))
@@ -210,7 +248,9 @@ def main():
             ram = h.get("totalPhysMemBytes")
             w.writerow([
                 h.get("hostname", hid), h.get("ipAddress", ""), h.get("rackId", ""), h.get("numCores", ""),
-                "%.0f" % (ram / 1024.0 ** 3) if ram else "", h.get("healthSummary", ""), h.get("lastHeartbeat", ""),
+                "%.0f" % (ram / 1024.0 ** 3) if ram else "",
+                "%.1f" % (disk_by_host[h.get("hostname")] / 1024.0 ** 4) if h.get("hostname") in disk_by_host else "",
+                layer_of(types), h.get("healthSummary", ""), h.get("lastHeartbeat", ""),
                 len(roles),
                 " ".join(sorted(set(t for t in types if t in STATEFUL))),
                 " ".join(sorted(set(t for t in types if t in COORDINATOR))),
