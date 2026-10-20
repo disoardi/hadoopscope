@@ -13,6 +13,7 @@ WHAT IT DOES
   never written to disk.
 
 USAGE
+  DIRECT=1 python3 ...   # ignore http_proxy/https_proxy ("Tunnel connection failed: 403 URLBlocked" = the proxy blocks the host)
   python3 ambari_inventory.py                                   # asks for URL, user and password
   AMBARI_URL=http://ambari-host:8080 OUT=./amb-prod python3 ambari_inventory.py
   CLUSTER=<cluster name> ...                                    # only one cluster (default: all)
@@ -32,6 +33,8 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+
+DIRECT = os.environ.get("DIRECT", "") not in ("", "0")  # DIRECT=1: ignore http(s)_proxy (internal hosts behind a URL filter)
 
 MASTER = set(["NAMENODE", "JOURNALNODE", "SECONDARY_NAMENODE", "RESOURCEMANAGER", "HISTORYSERVER",
               "APP_TIMELINE_SERVER", "HBASE_MASTER", "ZKFC"])
@@ -86,7 +89,9 @@ class Ambari(object):
         if params:
             url += "?" + urllib.parse.urlencode(params, safe="/,")
         req = urllib.request.Request(url, headers=self.hdr)  # GET only
-        with urllib.request.urlopen(req, timeout=180, context=self.ctx) as r:
+        opener = urllib.request.build_opener(*([urllib.request.ProxyHandler({})] if DIRECT else []),
+                                             urllib.request.HTTPSHandler(context=self.ctx))
+        with opener.open(req, timeout=180) as r:
             return json.loads(r.read().decode("utf-8"))
 
 

@@ -16,6 +16,7 @@ WHAT IT DOES
   never written to disk.
 
 USAGE
+  DIRECT=1 python3 ...   # ignore http_proxy/https_proxy ("Tunnel connection failed: 403 URLBlocked" = the proxy blocks the host)
   python3 cm_inventory.py                        # asks for URL, user and password
   CM_URL=https://cm.example:7183 python3 cm_inventory.py
   CM_URL=... CLUSTER="Cluster 1" OUT=./cm-inv python3 cm_inventory.py   # only one cluster
@@ -35,6 +36,8 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+
+DIRECT = os.environ.get("DIRECT", "") not in ("", "0")  # DIRECT=1: ignore http(s)_proxy (internal hosts behind a URL filter)
 
 STATEFUL = set([
     "NAMENODE", "JOURNALNODE", "SECONDARYNAMENODE", "ZOOKEEPER", "SERVER",  # SERVER is the ZK role type
@@ -100,7 +103,9 @@ class Cm(object):
         if params:
             url += "?" + urllib.parse.urlencode(params)
         req = urllib.request.Request(url, headers=self.hdr)  # GET only
-        with urllib.request.urlopen(req, timeout=120, context=self.ctx) as r:
+        opener = urllib.request.build_opener(*([urllib.request.ProxyHandler({})] if DIRECT else []),
+                                             urllib.request.HTTPSHandler(context=self.ctx))
+        with opener.open(req, timeout=120) as r:
             return r.read().decode("utf-8")
 
     def j(self, path, **params):
