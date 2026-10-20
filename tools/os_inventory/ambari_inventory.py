@@ -77,7 +77,8 @@ class Ambari(object):
     def __init__(self, base, user, password):
         self.base = base
         tok = base64.b64encode(("%s:%s" % (user, password)).encode("utf-8")).decode("ascii")
-        self.hdr = {"Authorization": "Basic " + tok, "X-Requested-By": "inventory", "Accept": "application/json"}
+        # no Accept header: the Ambari REST API answers JSON as text/plain and replies 406 to "Accept: application/json"
+        self.hdr = {"Authorization": "Basic " + tok, "X-Requested-By": "inventory"}
         self.ctx = ssl_ctx()
 
     def get(self, path, **params):
